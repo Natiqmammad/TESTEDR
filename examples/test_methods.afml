@@ -1,0 +1,25 @@
+import forge.log as log;
+
+fun apex() {
+    // Test method calls on vec
+    let arr = [1, 2, 3, 4, 5];
+    log.info("Original array:", arr);
+    
+    arr.reverse();
+    log.info("After reverse:", arr);
+    
+    arr.sort();
+    log.info("After sort:", arr);
+    
+    log.info("Length:", arr.len());
+    
+    // Test method calls on string
+    let s = "hello world";
+    log.info("Original string:", s);
+    log.info("Uppercase:", s.to_upper());
+    log.info("Lowercase:", s.to_lower());
+    log.info("Trimmed:", "  hello  ".trim());
+    log.info("Contains 'world':", s.contains("world"));
+    log.info("Starts with 'hello':", s.starts_with("hello"));
+    log.info("Ends with 'world':", s.ends_with("world"));
+}

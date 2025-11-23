@@ -1,0 +1,7 @@
+import forge.log as log;
+
+fun apex() {
+    log.info("Test 1: Simple log");
+    log.info("Test 2: Another log");
+    log.info("Done!");
+}

@@ -1,0 +1,25 @@
+import forge;
+import forge.log as log;
+import forge.ui as ui;
+
+fun build_widget() {
+    ui.scaffold(
+        ui.app_bar("AFNS Flutter Bridge"),
+        ui.center(
+            ui.column([
+                ui.text("Hello from AFNS VM"),
+                ui.text("Rendered through Flutter engine"),
+                ui.button("Tap Me", fun() { log.info("Button tapped from AFNS"); })
+            ])
+        )
+    )
+}
+
+fun stats() -> i64 {
+    42
+}
+
+fun apex() {
+    log.info("Flutter engine demo script loaded.");
+    log.info("Use the host bridge to call build_widget() and stats().");
+}

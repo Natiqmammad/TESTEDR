@@ -1,0 +1,35 @@
+import forge.log as log;
+import forge.flutter as flutter;
+
+fun apex() {
+    log.info("=== Flutter VM Test ===");
+    
+    // Initialize Flutter VM
+    log.info("Starting Flutter VM...");
+    flutter.run_app("MyApp");
+    
+    // Create simple widget tree
+    log.info("Building widget tree...");
+    
+    let title_text = flutter.text("Welcome to Flutter VM");
+    log.info("Created title text");
+    
+    let button = flutter.button("Press Me");
+    log.info("Created button");
+    
+    let column = flutter.column([]);
+    log.info("Created column layout");
+    
+    let scaffold = flutter.scaffold();
+    log.info("Created scaffold");
+    
+    let app = flutter.center();
+    log.info("Created center widget");
+    
+    // Simulate widget tree execution
+    log.info("Executing widget tree...");
+    log.info("VM processing events...");
+    log.info("Rendering UI...");
+    
+    log.info("=== Flutter VM test completed ===");
+}

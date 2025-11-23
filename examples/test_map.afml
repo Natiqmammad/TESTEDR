@@ -1,0 +1,27 @@
+import forge.log as log;
+import forge.map as map;
+
+fun apex() {
+    // Test map operations
+    let m = map.new();
+    
+    m.put("name", "John");
+    m.put("age", 30);
+    m.put("city", "New York");
+    
+    log.info("Map length:", m.len());
+    
+    log.info("name:", m.get("name"));
+    log.info("age:", m.get("age"));
+    log.info("city:", m.get("city"));
+    
+    let keys = m.keys();
+    log.info("Keys:", keys);
+    
+    let values = m.values();
+    log.info("Values:", values);
+    
+    let removed = m.remove("age");
+    log.info("Removed age:", removed);
+    log.info("Map length after remove:", m.len());
+}

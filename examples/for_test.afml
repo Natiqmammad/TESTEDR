@@ -1,0 +1,12 @@
+import forge;
+import forge.vec as vec;
+import forge.log as log;
+
+fun apex() {
+    let items = vec.new();
+    vec.push(items, 1);
+    vec.push(items, 2);
+    for item in items {
+        log.info("item = ", item);
+    }
+}

@@ -1,0 +1,33 @@
+import forge;
+import forge.vec as vec;
+import forge.result as result;
+import forge.option as option;
+import forge.str as str;
+import forge.log as log;
+
+fun safe_div(a:: f64, b:: f64) -> result<f64, str> {
+    if b == 0 {
+        return result.err("division by zero");
+    }
+    return result.ok(a / b);
+}
+
+fun uppercase_or_none(text:: str) -> option<str> {
+    if str.len(text) == 0 {
+        return option.none();
+    }
+    return option.some(str.to_upper(text));
+}
+
+fun apex() {
+    let items = vec.new();
+    vec.push(items, "alpha");
+    vec.push(items, "beta");
+    log.info("items =", items, "len =", vec.len(items));
+
+    let value = safe_div(10.0, 2.0)?;
+    log.info("safe_div =", value);
+
+    let shout = uppercase_or_none("hello")?;
+    log.info("shout =", shout);
+}

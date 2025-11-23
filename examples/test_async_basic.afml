@@ -1,0 +1,12 @@
+import forge.log as log;
+import forge.async as async;
+
+fun apex() {
+    log.info("Starting async test");
+    
+    let future = async.sleep(10000);
+    log.info("Future created, awaiting...");
+    
+    let result = await future;
+    log.info("Sleep completed!");
+}

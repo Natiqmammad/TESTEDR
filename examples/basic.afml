@@ -1,0 +1,18 @@
+import forge;
+import forge.log as log;
+import forge.math as math;
+
+fun apex() {
+    let radius = 5.0;
+    let area = math.pi() * radius * radius;
+    let root = math.sqrt(3.0);
+
+    log.info("Circle area = ", area);
+    log.info("√3 = ", root);
+
+    if radius == 0 {
+        log.info("radius is zero");
+    } else {
+        log.info("radius ok");
+    }
+}

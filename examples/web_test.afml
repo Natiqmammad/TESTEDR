@@ -1,0 +1,53 @@
+import forge.log as log;
+import forge.web as web;
+
+fun apex() {
+    log.info("=== Web Server Phase 4 Test ===");
+    
+    // Test web server initialization
+    log.info("Starting web server...");
+    let server = web.listen("127.0.0.1", 8080);
+    log.info("Server: " + server);
+    
+    // Test route registration
+    log.info("Registering routes...");
+    let route1 = web.route("/api/users", "get_users");
+    log.info("Route 1: " + route1);
+    
+    let route2 = web.route("/api/posts", "get_posts");
+    log.info("Route 2: " + route2);
+    
+    // Test static file serving
+    log.info("Setting up static file serving...");
+    let static_serve = web.serve("./public");
+    log.info("Static serve: " + static_serve);
+    
+    // Test request handling
+    log.info("Testing request handling...");
+    let request = "GET /api/users HTTP/1.1";
+    let method = web.request_method(request);
+    log.info("Request method: " + method);
+    
+    let path = web.request_path(request);
+    log.info("Request path: " + path);
+    
+    let headers = web.request_headers(request);
+    log.info("Request headers retrieved");
+    
+    let body = web.request_body(request);
+    log.info("Request body: " + body);
+    
+    // Test response handling
+    log.info("Testing response handling...");
+    let response = "HTTP/1.1 200 OK";
+    web.response_status(response, 200);
+    log.info("Response status set to 200");
+    
+    web.response_set_header(response, "Content-Type", "application/json");
+    log.info("Response header set");
+    
+    web.response_send(response, "{\"status\": \"ok\"}");
+    log.info("Response sent");
+    
+    log.info("=== Web server test completed ===");
+}
