@@ -3,33 +3,27 @@ import forge.flutter as flutter;
 
 fun apex() {
     log.info("=== Flutter VM Test ===");
-    
-    // Initialize Flutter VM
-    log.info("Starting Flutter VM...");
-    flutter.run_app("MyApp");
-    
-    // Create simple widget tree
-    log.info("Building widget tree...");
-    
-    let title_text = flutter.text("Welcome to Flutter VM");
-    log.info("Created title text");
-    
-    let button = flutter.button("Press Me");
-    log.info("Created button");
-    
-    let column = flutter.column([]);
-    log.info("Created column layout");
-    
-    let scaffold = flutter.scaffold();
-    log.info("Created scaffold");
-    
-    let app = flutter.center();
-    log.info("Created center widget");
-    
-    // Simulate widget tree execution
-    log.info("Executing widget tree...");
-    log.info("VM processing events...");
-    log.info("Rendering UI...");
-    
+    flutter.run_app("NightScript Flutter Demo");
+
+    // Root scaffold + app bar
+    flutter.build_widget("scaffold", "root");
+    flutter.build_widget("appbar", "app_bar", "NightScript Embedder");
+    flutter.add_child("root", "app_bar");
+
+    // Body column with text + button
+    flutter.build_widget("column", "body");
+    flutter.build_widget("text", "title", "Hello from NightScript VM");
+    flutter.add_child("body", "title");
+    flutter.build_widget("button", "cta", "Tap Me");
+    flutter.add_child("body", "cta");
+    flutter.add_child("root", "body");
+
+    flutter.window_metrics(1280, 720, 1.0);
+    flutter.render();
+
+    flutter.pointer_event("down", 48.0, 120.0);
+    flutter.pointer_event("up", 48.0, 120.0);
+    flutter.render();
+
     log.info("=== Flutter VM test completed ===");
 }

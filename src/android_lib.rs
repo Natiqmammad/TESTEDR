@@ -11,7 +11,7 @@ use std::ptr;
 use std::sync::Mutex;
 
 // Re-export the Android runtime module
-pub use crate::runtime::android::{AndroidRuntime, AndroidJNIBridge};
+pub use crate::runtime::android::{AndroidJNIBridge, AndroidRuntime};
 
 // Global Android runtime instance
 static mut ANDROID_RUNTIME: Option<Mutex<AndroidRuntime>> = None;
@@ -29,12 +29,16 @@ pub type jlong = i64;
 #[cfg(target_os = "android")]
 mod android_log {
     extern "C" {
-        pub fn __android_log_write(prio: libc::c_int, tag: *const libc::c_char, msg: *const libc::c_char);
+        pub fn __android_log_write(
+            prio: libc::c_int,
+            tag: *const libc::c_char,
+            msg: *const libc::c_char,
+        );
     }
-    
+
     pub const ANDROID_LOG_INFO: libc::c_int = 4;
     pub const ANDROID_LOG_ERROR: libc::c_int = 6;
-    
+
     pub fn log_info(msg: &str) {
         let tag = CString::new("NightScript-Android").unwrap();
         let msg = CString::new(msg).unwrap();
@@ -42,7 +46,7 @@ mod android_log {
             __android_log_write(ANDROID_LOG_INFO, tag.as_ptr(), msg.as_ptr());
         }
     }
-    
+
     pub fn log_error(msg: &str) {
         let tag = CString::new("NightScript-Android").unwrap();
         let msg = CString::new(msg).unwrap();
@@ -57,7 +61,7 @@ mod android_log {
     pub fn log_info(msg: &str) {
         println!("[NightScript-Android] {}", msg);
     }
-    
+
     pub fn log_error(msg: &str) {
         eprintln!("[NightScript-Android] ERROR: {}", msg);
     }
@@ -69,11 +73,14 @@ fn init_android_runtime() {
         if ANDROID_RUNTIME.is_none() {
             android_log::log_info("Initializing Android runtime...");
             ANDROID_RUNTIME = Some(Mutex::new(AndroidRuntime::new()));
-            
+
             if let Some(ref runtime) = ANDROID_RUNTIME {
                 if let Ok(mut rt) = runtime.lock() {
                     if let Err(e) = rt.initialize() {
-                        android_log::log_error(&format!("Failed to initialize Android runtime: {}", e));
+                        android_log::log_error(&format!(
+                            "Failed to initialize Android runtime: {}",
+                            e
+                        ));
                     } else {
                         android_log::log_info("Android runtime initialized successfully");
                     }
@@ -93,12 +100,12 @@ fn get_android_runtime() -> Option<&'static Mutex<AndroidRuntime>> {
 #[no_mangle]
 pub extern "C" fn JNI_OnLoad(vm: *mut c_void, _reserved: *mut c_void) -> c_int {
     android_log::log_info("JNI_OnLoad called - NightScript Android Library");
-    
+
     // Initialize Android runtime
     init_android_runtime();
-    
+
     android_log::log_info("NightScript Android library loaded successfully");
-    
+
     // Return JNI version
     0x00010006 // JNI_VERSION_1_6
 }
@@ -106,104 +113,104 @@ pub extern "C" fn JNI_OnLoad(vm: *mut c_void, _reserved: *mut c_void) -> c_int {
 #[no_mangle]
 pub extern "C" fn JNI_OnUnload(vm: *mut c_void, _reserved: *mut c_void) {
     android_log::log_info("JNI_OnUnload called - NightScript Android Library");
-    
+
     // Cleanup Android runtime
     unsafe {
         ANDROID_RUNTIME = None;
     }
-    
+
     android_log::log_info("NightScript Android library unloaded");
 }
 
 // Activity lifecycle callbacks
 
 #[no_mangle]
-pub extern "C" fn Java_com_nightscript_AFNSActivity_onNativeCreate(
-    env: JNIEnv,
-    clazz: jclass,
-) {
+pub extern "C" fn Java_com_nightscript_AFNSActivity_onNativeCreate(env: JNIEnv, clazz: jclass) {
     android_log::log_info("onNativeCreate callback");
-    
+
     if let Some(runtime) = get_android_runtime() {
         if let Ok(rt) = runtime.lock() {
             // Store activity state
             let mut ctx = rt.context.lock().unwrap();
-            ctx.insert("activity_created".to_string(), crate::runtime::Value::Bool(true));
+            ctx.insert(
+                "activity_created".to_string(),
+                crate::runtime::Value::Bool(true),
+            );
         }
     }
 }
 
 #[no_mangle]
-pub extern "C" fn Java_com_nightscript_AFNSActivity_onNativeStart(
-    env: JNIEnv,
-    clazz: jclass,
-) {
+pub extern "C" fn Java_com_nightscript_AFNSActivity_onNativeStart(env: JNIEnv, clazz: jclass) {
     android_log::log_info("onNativeStart callback");
-    
+
     if let Some(runtime) = get_android_runtime() {
         if let Ok(rt) = runtime.lock() {
             let mut ctx = rt.context.lock().unwrap();
-            ctx.insert("activity_started".to_string(), crate::runtime::Value::Bool(true));
+            ctx.insert(
+                "activity_started".to_string(),
+                crate::runtime::Value::Bool(true),
+            );
         }
     }
 }
 
 #[no_mangle]
-pub extern "C" fn Java_com_nightscript_AFNSActivity_onNativeResume(
-    env: JNIEnv,
-    clazz: jclass,
-) {
+pub extern "C" fn Java_com_nightscript_AFNSActivity_onNativeResume(env: JNIEnv, clazz: jclass) {
     android_log::log_info("onNativeResume callback");
-    
+
     if let Some(runtime) = get_android_runtime() {
         if let Ok(rt) = runtime.lock() {
             let mut ctx = rt.context.lock().unwrap();
-            ctx.insert("activity_resumed".to_string(), crate::runtime::Value::Bool(true));
+            ctx.insert(
+                "activity_resumed".to_string(),
+                crate::runtime::Value::Bool(true),
+            );
         }
     }
 }
 
 #[no_mangle]
-pub extern "C" fn Java_com_nightscript_AFNSActivity_onNativePause(
-    env: JNIEnv,
-    clazz: jclass,
-) {
+pub extern "C" fn Java_com_nightscript_AFNSActivity_onNativePause(env: JNIEnv, clazz: jclass) {
     android_log::log_info("onNativePause callback");
-    
+
     if let Some(runtime) = get_android_runtime() {
         if let Ok(rt) = runtime.lock() {
             let mut ctx = rt.context.lock().unwrap();
-            ctx.insert("activity_paused".to_string(), crate::runtime::Value::Bool(true));
+            ctx.insert(
+                "activity_paused".to_string(),
+                crate::runtime::Value::Bool(true),
+            );
         }
     }
 }
 
 #[no_mangle]
-pub extern "C" fn Java_com_nightscript_AFNSActivity_onNativeStop(
-    env: JNIEnv,
-    clazz: jclass,
-) {
+pub extern "C" fn Java_com_nightscript_AFNSActivity_onNativeStop(env: JNIEnv, clazz: jclass) {
     android_log::log_info("onNativeStop callback");
-    
+
     if let Some(runtime) = get_android_runtime() {
         if let Ok(rt) = runtime.lock() {
             let mut ctx = rt.context.lock().unwrap();
-            ctx.insert("activity_stopped".to_string(), crate::runtime::Value::Bool(true));
+            ctx.insert(
+                "activity_stopped".to_string(),
+                crate::runtime::Value::Bool(true),
+            );
         }
     }
 }
 
 #[no_mangle]
-pub extern "C" fn Java_com_nightscript_AFNSActivity_onNativeDestroy(
-    env: JNIEnv,
-    clazz: jclass,
-) {
+pub extern "C" fn Java_com_nightscript_AFNSActivity_onNativeDestroy(env: JNIEnv, clazz: jclass) {
     android_log::log_info("onNativeDestroy callback");
-    
+
     if let Some(runtime) = get_android_runtime() {
         if let Ok(rt) = runtime.lock() {
             let mut ctx = rt.context.lock().unwrap();
-            ctx.insert("activity_destroyed".to_string(), crate::runtime::Value::Bool(true));
+            ctx.insert(
+                "activity_destroyed".to_string(),
+                crate::runtime::Value::Bool(true),
+            );
         }
     }
 }
@@ -220,14 +227,20 @@ pub extern "C" fn Java_com_nightscript_AFNSActivity_onNativePermissionResult(
             .to_string_lossy()
             .to_string()
     };
-    
-    android_log::log_info(&format!("Permission result: {} -> {}", permission_str, granted != 0));
-    
+
+    android_log::log_info(&format!(
+        "Permission result: {} -> {}",
+        permission_str,
+        granted != 0
+    ));
+
     if let Some(runtime) = get_android_runtime() {
         if let Ok(rt) = runtime.lock() {
             // Update permission state
-            rt.jni_bridge.permissions.insert(permission_str.clone(), granted != 0);
-            
+            rt.jni_bridge
+                .permissions
+                .insert(permission_str.clone(), granted != 0);
+
             // Store in context
             let mut ctx = rt.context.lock().unwrap();
             ctx.insert(
@@ -250,20 +263,29 @@ pub extern "C" fn Java_com_nightscript_AFNSActivity_onNativeIntentReceived(
             .to_string_lossy()
             .to_string()
     };
-    
+
     let extras_str = unsafe {
         CStr::from_ptr(extras as *const c_char)
             .to_string_lossy()
             .to_string()
     };
-    
-    android_log::log_info(&format!("Intent received: {} with extras: {}", action_str, extras_str));
-    
+
+    android_log::log_info(&format!(
+        "Intent received: {} with extras: {}",
+        action_str, extras_str
+    ));
+
     if let Some(runtime) = get_android_runtime() {
         if let Ok(rt) = runtime.lock() {
             let mut ctx = rt.context.lock().unwrap();
-            ctx.insert("intent_action".to_string(), crate::runtime::Value::String(action_str));
-            ctx.insert("intent_extras".to_string(), crate::runtime::Value::String(extras_str));
+            ctx.insert(
+                "intent_action".to_string(),
+                crate::runtime::Value::String(action_str),
+            );
+            ctx.insert(
+                "intent_extras".to_string(),
+                crate::runtime::Value::String(extras_str),
+            );
         }
     }
 }
@@ -281,9 +303,9 @@ pub extern "C" fn Java_com_nightscript_AFNSActivity_callShowToast(
             .to_string_lossy()
             .to_string()
     };
-    
+
     android_log::log_info(&format!("Toast requested: {}", message_str));
-    
+
     if let Some(runtime) = get_android_runtime() {
         if let Ok(rt) = runtime.lock() {
             if let Err(e) = rt.jni_bridge.show_toast(&message_str) {
@@ -304,9 +326,9 @@ pub extern "C" fn Java_com_nightscript_AFNSActivity_callRequestPermission(
             .to_string_lossy()
             .to_string()
     };
-    
+
     android_log::log_info(&format!("Permission requested: {}", permission_str));
-    
+
     if let Some(runtime) = get_android_runtime() {
         if let Ok(mut rt) = runtime.lock() {
             match rt.jni_bridge.request_permission(&permission_str) {
@@ -335,9 +357,9 @@ pub extern "C" fn Java_com_nightscript_AFNSActivity_callIsPermissionGranted(
             .to_string_lossy()
             .to_string()
     };
-    
+
     android_log::log_info(&format!("Permission check: {}", permission_str));
-    
+
     if let Some(runtime) = get_android_runtime() {
         if let Ok(rt) = runtime.lock() {
             match rt.jni_bridge.is_permission_granted(&permission_str) {
@@ -367,15 +389,18 @@ pub extern "C" fn Java_com_nightscript_AFNSActivity_callSendIntent(
             .to_string_lossy()
             .to_string()
     };
-    
+
     let extras_str = unsafe {
         CStr::from_ptr(extras as *const c_char)
             .to_string_lossy()
             .to_string()
     };
-    
-    android_log::log_info(&format!("Intent send: {} with extras: {}", action_str, extras_str));
-    
+
+    android_log::log_info(&format!(
+        "Intent send: {} with extras: {}",
+        action_str, extras_str
+    ));
+
     if let Some(runtime) = get_android_runtime() {
         if let Ok(rt) = runtime.lock() {
             if let Err(e) = rt.jni_bridge.send_intent(&action_str, &extras_str) {
@@ -391,7 +416,7 @@ pub extern "C" fn Java_com_nightscript_AFNSActivity_callGetInternalPath(
     clazz: jclass,
 ) -> jstring {
     android_log::log_info("Internal storage path requested");
-    
+
     let path = if let Some(runtime) = get_android_runtime() {
         if let Ok(rt) = runtime.lock() {
             match rt.jni_bridge.get_internal_storage_path() {
@@ -407,10 +432,8 @@ pub extern "C" fn Java_com_nightscript_AFNSActivity_callGetInternalPath(
     } else {
         "/data/data/com.nightscript/files".to_string()
     };
-    
-    unsafe {
-        CString::new(path).unwrap().into_raw() as jstring
-    }
+
+    unsafe { CString::new(path).unwrap().into_raw() as jstring }
 }
 
 #[no_mangle]
@@ -419,7 +442,7 @@ pub extern "C" fn Java_com_nightscript_AFNSActivity_callGetExternalPath(
     clazz: jclass,
 ) -> jstring {
     android_log::log_info("External storage path requested");
-    
+
     let path = if let Some(runtime) = get_android_runtime() {
         if let Ok(rt) = runtime.lock() {
             match rt.jni_bridge.get_external_storage_path() {
@@ -435,8 +458,6 @@ pub extern "C" fn Java_com_nightscript_AFNSActivity_callGetExternalPath(
     } else {
         "/storage/emulated/0/Android/data/com.nightscript/files".to_string()
     };
-    
-    unsafe {
-        CString::new(path).unwrap().into_raw() as jstring
-    }
+
+    unsafe { CString::new(path).unwrap().into_raw() as jstring }
 }

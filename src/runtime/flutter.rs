@@ -2,10 +2,10 @@
 // This module provides a Flutter-inspired widget system with console rendering
 // and basic state management. Acts as a VM layer similar to Dart's VM for Flutter.
 
-use crate::runtime::{Value, RuntimeError, RuntimeResult, Interpreter};
+use crate::runtime::{Interpreter, RuntimeError, RuntimeResult, Value};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::cell::RefCell;
 
 /// Flutter VM - Executes widget tree like Dart VM executes Flutter code
 #[derive(Clone, Debug)]
@@ -221,7 +221,10 @@ impl FlutterWidget {
                 )
             }
             FlutterWidget::AppBar { title, elevation } => {
-                format!("{}AppBar(title: \"{}\", elevation: {})", prefix, title, elevation)
+                format!(
+                    "{}AppBar(title: \"{}\", elevation: {})",
+                    prefix, title, elevation
+                )
             }
             FlutterWidget::Text { content, style } => {
                 format!(
@@ -235,7 +238,10 @@ impl FlutterWidget {
             FlutterWidget::FloatingActionButton { icon, .. } => {
                 format!("{}FloatingActionButton(icon: \"{}\")", prefix, icon)
             }
-            FlutterWidget::Column { children, main_axis_alignment } => {
+            FlutterWidget::Column {
+                children,
+                main_axis_alignment,
+            } => {
                 let mut result = format!(
                     "{}Column(mainAxisAlignment: \"{}\", children: [\n",
                     prefix, main_axis_alignment
@@ -246,7 +252,10 @@ impl FlutterWidget {
                 result.push_str(&format!("{}])", prefix));
                 result
             }
-            FlutterWidget::Row { children, main_axis_alignment } => {
+            FlutterWidget::Row {
+                children,
+                main_axis_alignment,
+            } => {
                 let mut result = format!(
                     "{}Row(mainAxisAlignment: \"{}\", children: [\n",
                     prefix, main_axis_alignment
@@ -257,7 +266,14 @@ impl FlutterWidget {
                 result.push_str(&format!("{}])", prefix));
                 result
             }
-            FlutterWidget::Container { child, width, height, color, padding, .. } => {
+            FlutterWidget::Container {
+                child,
+                width,
+                height,
+                color,
+                padding,
+                ..
+            } => {
                 let child_str = child
                     .as_ref()
                     .map(|c| c.render(indent + 1))
@@ -281,7 +297,11 @@ impl FlutterWidget {
                     child.render(indent + 1)
                 )
             }
-            FlutterWidget::SizedBox { width, height, child } => {
+            FlutterWidget::SizedBox {
+                width,
+                height,
+                child,
+            } => {
                 let child_str = child
                     .as_ref()
                     .map(|c| c.render(indent + 1))
@@ -299,7 +319,10 @@ impl FlutterWidget {
                     child.render(indent + 1)
                 )
             }
-            FlutterWidget::ListView { children, scroll_direction } => {
+            FlutterWidget::ListView {
+                children,
+                scroll_direction,
+            } => {
                 let mut result = format!(
                     "{}ListView(scrollDirection: \"{}\", children: [\n",
                     prefix, scroll_direction
@@ -310,7 +333,10 @@ impl FlutterWidget {
                 result.push_str(&format!("{}])", prefix));
                 result
             }
-            FlutterWidget::GridView { children, cross_axis_count } => {
+            FlutterWidget::GridView {
+                children,
+                cross_axis_count,
+            } => {
                 let mut result = format!(
                     "{}GridView(crossAxisCount: {}, children: [\n",
                     prefix, cross_axis_count
@@ -341,17 +367,25 @@ impl FlutterWidget {
             FlutterWidget::Switch { value, .. } => {
                 format!("{}Switch(value: {})", prefix, value)
             }
-            FlutterWidget::Slider { min, max, value, .. } => {
+            FlutterWidget::Slider {
+                min, max, value, ..
+            } => {
                 format!(
                     "{}Slider(min: {}, max: {}, value: {})",
                     prefix, min, max, value
                 )
             }
             FlutterWidget::Icon { name, size, color } => {
-                format!("{}Icon(name: \"{}\", size: {}, color: \"{}\")", prefix, name, size, color)
+                format!(
+                    "{}Icon(name: \"{}\", size: {}, color: \"{}\")",
+                    prefix, name, size, color
+                )
             }
             FlutterWidget::Divider { height, color } => {
-                format!("{}Divider(height: {}, color: \"{}\")", prefix, height, color)
+                format!(
+                    "{}Divider(height: {}, color: \"{}\")",
+                    prefix, height, color
+                )
             }
         }
     }
@@ -382,14 +416,20 @@ impl FlutterVM {
     /// Push widget onto stack
     pub fn push_widget(&mut self, widget: FlutterWidget) {
         self.widget_stack.push(widget);
-        println!("[FLUTTER VM] Widget pushed to stack (depth: {})", self.widget_stack.len());
+        println!(
+            "[FLUTTER VM] Widget pushed to stack (depth: {})",
+            self.widget_stack.len()
+        );
     }
 
     /// Pop widget from stack
     pub fn pop_widget(&mut self) -> Option<FlutterWidget> {
         let widget = self.widget_stack.pop();
         if widget.is_some() {
-            println!("[FLUTTER VM] Widget popped from stack (depth: {})", self.widget_stack.len());
+            println!(
+                "[FLUTTER VM] Widget popped from stack (depth: {})",
+                self.widget_stack.len()
+            );
         }
         widget
     }
@@ -400,8 +440,11 @@ impl FlutterVM {
             return Err(RuntimeError::new("Flutter VM not running"));
         }
 
-        println!("[FLUTTER VM] Executing widget tree ({} widgets)", self.widget_stack.len());
-        
+        println!(
+            "[FLUTTER VM] Executing widget tree ({} widgets)",
+            self.widget_stack.len()
+        );
+
         // Process event queue
         while !self.event_queue.is_empty() {
             let event = self.event_queue.remove(0);
@@ -419,15 +462,21 @@ impl FlutterVM {
             }
             FlutterEvent::TextChanged { widget_id, text } => {
                 println!("[FLUTTER VM] Text changed in {}: {}", widget_id, text);
-                self.state_store.borrow_mut().insert(widget_id, Value::String(text));
+                self.state_store
+                    .borrow_mut()
+                    .insert(widget_id, Value::String(text));
             }
             FlutterEvent::SwitchToggled { widget_id, value } => {
                 println!("[FLUTTER VM] Switch toggled in {}: {}", widget_id, value);
-                self.state_store.borrow_mut().insert(widget_id, Value::Bool(value));
+                self.state_store
+                    .borrow_mut()
+                    .insert(widget_id, Value::Bool(value));
             }
             FlutterEvent::SliderChanged { widget_id, value } => {
                 println!("[FLUTTER VM] Slider changed in {}: {}", widget_id, value);
-                self.state_store.borrow_mut().insert(widget_id, Value::Float(value));
+                self.state_store
+                    .borrow_mut()
+                    .insert(widget_id, Value::Float(value));
             }
         }
         Ok(())
@@ -451,9 +500,14 @@ impl FlutterApp {
     pub fn render(&self) -> String {
         let mut output = String::new();
         output.push_str(&format!("╔════════════════════════════════════╗\n"));
-        output.push_str(&format!("║  Flutter App: {}                    ║\n", self.name));
-        output.push_str(&format!("║  Theme: Primary={}, Accent={}  ║\n", 
-            self.theme.primary_color, self.theme.accent_color));
+        output.push_str(&format!(
+            "║  Flutter App: {}                    ║\n",
+            self.name
+        ));
+        output.push_str(&format!(
+            "║  Theme: Primary={}, Accent={}  ║\n",
+            self.theme.primary_color, self.theme.accent_color
+        ));
         output.push_str(&format!("╚════════════════════════════════════╝\n\n"));
 
         if let Some(widget) = &self.root_widget {
@@ -467,10 +521,7 @@ impl FlutterApp {
 }
 
 /// Builtin Flutter functions
-pub fn builtin_flutter_run_app(
-    _interp: &mut Interpreter,
-    args: &[Value],
-) -> RuntimeResult<Value> {
+pub fn builtin_flutter_run_app(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     if args.is_empty() {
         return Err(RuntimeError::new("flutter.run_app expects app argument"));
     }
@@ -482,10 +533,7 @@ pub fn builtin_flutter_run_app(
     Ok(Value::Null)
 }
 
-pub fn builtin_flutter_text(
-    _interp: &mut Interpreter,
-    args: &[Value],
-) -> RuntimeResult<Value> {
+pub fn builtin_flutter_text(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     if args.is_empty() {
         return Err(RuntimeError::new("Text expects content argument"));
     }
@@ -499,10 +547,7 @@ pub fn builtin_flutter_text(
     }
 }
 
-pub fn builtin_flutter_button(
-    _interp: &mut Interpreter,
-    args: &[Value],
-) -> RuntimeResult<Value> {
+pub fn builtin_flutter_button(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     if args.is_empty() {
         return Err(RuntimeError::new("Button expects label argument"));
     }
@@ -516,10 +561,7 @@ pub fn builtin_flutter_button(
     }
 }
 
-pub fn builtin_flutter_column(
-    _interp: &mut Interpreter,
-    args: &[Value],
-) -> RuntimeResult<Value> {
+pub fn builtin_flutter_column(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     if args.is_empty() {
         return Err(RuntimeError::new("Column expects children argument"));
     }
@@ -528,10 +570,7 @@ pub fn builtin_flutter_column(
     Ok(Value::String("Column([...])".to_string()))
 }
 
-pub fn builtin_flutter_row(
-    _interp: &mut Interpreter,
-    args: &[Value],
-) -> RuntimeResult<Value> {
+pub fn builtin_flutter_row(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     if args.is_empty() {
         return Err(RuntimeError::new("Row expects children argument"));
     }
@@ -548,10 +587,7 @@ pub fn builtin_flutter_scaffold(
     Ok(Value::String("Scaffold({...})".to_string()))
 }
 
-pub fn builtin_flutter_appbar(
-    _interp: &mut Interpreter,
-    args: &[Value],
-) -> RuntimeResult<Value> {
+pub fn builtin_flutter_appbar(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     if args.is_empty() {
         return Err(RuntimeError::new("AppBar expects title argument"));
     }
@@ -565,10 +601,7 @@ pub fn builtin_flutter_appbar(
     }
 }
 
-pub fn builtin_flutter_center(
-    _interp: &mut Interpreter,
-    _args: &[Value],
-) -> RuntimeResult<Value> {
+pub fn builtin_flutter_center(_interp: &mut Interpreter, _args: &[Value]) -> RuntimeResult<Value> {
     println!("[FLUTTER] Center widget created");
     Ok(Value::String("Center({...})".to_string()))
 }

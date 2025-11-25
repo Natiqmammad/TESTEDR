@@ -1,7 +1,7 @@
 // Phase 4: Web Server Support
 // This module provides HTTP server stubs for web platform
 
-use crate::runtime::{Value, RuntimeError, RuntimeResult, Interpreter};
+use crate::runtime::{Interpreter, RuntimeError, RuntimeResult, Value};
 use std::collections::HashMap;
 
 /// HTTP Request representation
@@ -102,12 +102,11 @@ impl WebServer {
 }
 
 /// Builtin web functions
-pub fn builtin_web_listen(
-    _interp: &mut Interpreter,
-    args: &[Value],
-) -> RuntimeResult<Value> {
+pub fn builtin_web_listen(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     if args.len() < 2 {
-        return Err(RuntimeError::new("web.listen expects host and port arguments"));
+        return Err(RuntimeError::new(
+            "web.listen expects host and port arguments",
+        ));
     }
 
     let host = match &args[0] {
@@ -121,15 +120,17 @@ pub fn builtin_web_listen(
     };
 
     println!("[WEB] Listening on {}:{}", host, port);
-    Ok(Value::String(format!("Server listening on {}:{}", host, port)))
+    Ok(Value::String(format!(
+        "Server listening on {}:{}",
+        host, port
+    )))
 }
 
-pub fn builtin_web_route(
-    _interp: &mut Interpreter,
-    args: &[Value],
-) -> RuntimeResult<Value> {
+pub fn builtin_web_route(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     if args.len() < 2 {
-        return Err(RuntimeError::new("web.route expects path and handler arguments"));
+        return Err(RuntimeError::new(
+            "web.route expects path and handler arguments",
+        ));
     }
 
     let path = match &args[0] {
@@ -141,10 +142,7 @@ pub fn builtin_web_route(
     Ok(Value::String(format!("Route {} registered", path)))
 }
 
-pub fn builtin_web_serve(
-    _interp: &mut Interpreter,
-    args: &[Value],
-) -> RuntimeResult<Value> {
+pub fn builtin_web_serve(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     if args.is_empty() {
         return Err(RuntimeError::new("web.serve expects file path argument"));
     }
@@ -170,10 +168,7 @@ pub fn builtin_web_request_method(
     Ok(Value::String("GET".to_string()))
 }
 
-pub fn builtin_web_request_path(
-    _interp: &mut Interpreter,
-    args: &[Value],
-) -> RuntimeResult<Value> {
+pub fn builtin_web_request_path(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     if args.is_empty() {
         return Err(RuntimeError::new("request.path expects request argument"));
     }
@@ -187,17 +182,18 @@ pub fn builtin_web_request_headers(
     args: &[Value],
 ) -> RuntimeResult<Value> {
     if args.is_empty() {
-        return Err(RuntimeError::new("request.headers expects request argument"));
+        return Err(RuntimeError::new(
+            "request.headers expects request argument",
+        ));
     }
 
     println!("[WEB] Getting request headers");
-    Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(HashMap::new()))))
+    Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(
+        HashMap::new(),
+    ))))
 }
 
-pub fn builtin_web_request_body(
-    _interp: &mut Interpreter,
-    args: &[Value],
-) -> RuntimeResult<Value> {
+pub fn builtin_web_request_body(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     if args.is_empty() {
         return Err(RuntimeError::new("request.body expects request argument"));
     }
@@ -211,7 +207,9 @@ pub fn builtin_web_response_status(
     args: &[Value],
 ) -> RuntimeResult<Value> {
     if args.len() < 2 {
-        return Err(RuntimeError::new("response.status expects response and status arguments"));
+        return Err(RuntimeError::new(
+            "response.status expects response and status arguments",
+        ));
     }
 
     match &args[1] {
@@ -247,7 +245,9 @@ pub fn builtin_web_response_send(
     args: &[Value],
 ) -> RuntimeResult<Value> {
     if args.len() < 2 {
-        return Err(RuntimeError::new("response.send expects response and body arguments"));
+        return Err(RuntimeError::new(
+            "response.send expects response and body arguments",
+        ));
     }
 
     match &args[1] {

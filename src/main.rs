@@ -1,5 +1,6 @@
 mod ast;
 mod diagnostics;
+mod flutter;
 mod lexer;
 mod parser;
 mod runtime;

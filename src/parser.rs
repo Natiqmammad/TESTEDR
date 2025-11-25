@@ -60,7 +60,10 @@ impl<'a> Parser<'a> {
             return Err(err);
         }
 
-        let span = if let Some(first) = self.tokens.iter().find(|t| !matches!(t.kind, TokenKind::Eof))
+        let span = if let Some(first) = self
+            .tokens
+            .iter()
+            .find(|t| !matches!(t.kind, TokenKind::Eof))
         {
             let last = self
                 .tokens
@@ -73,7 +76,11 @@ impl<'a> Parser<'a> {
             Span::new(0, 0, 1, 1)
         };
 
-        Ok(File { imports, items, span })
+        Ok(File {
+            imports,
+            items,
+            span,
+        })
     }
 
     fn parse_import(&mut self) -> Result<Import, ParseError> {
@@ -177,7 +184,9 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
-                let end = self.expect_with("')'", |k| matches!(k, TokenKind::RightParen))?.span;
+                let end = self
+                    .expect_with("')'", |k| matches!(k, TokenKind::RightParen))?
+                    .span;
                 span = span.merge(end);
             }
             attrs.push(Attribute { name, args, span });
@@ -204,7 +213,9 @@ impl<'a> Parser<'a> {
                 span,
             });
         }
-        let end = self.expect_with("'}'", |k| matches!(k, TokenKind::RightBrace))?.span;
+        let end = self
+            .expect_with("'}'", |k| matches!(k, TokenKind::RightBrace))?
+            .span;
         Ok(StructDef {
             attributes,
             name,
@@ -232,7 +243,9 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
-                let close = self.expect_with("')'", |k| matches!(k, TokenKind::RightParen))?.span;
+                let close = self
+                    .expect_with("')'", |k| matches!(k, TokenKind::RightParen))?
+                    .span;
                 span = span.merge(close);
             }
             if self.match_with(|k| matches!(k, TokenKind::Comma)) {
@@ -244,7 +257,9 @@ impl<'a> Parser<'a> {
                 span,
             });
         }
-        let end = self.expect_with("'}'", |k| matches!(k, TokenKind::RightBrace))?.span;
+        let end = self
+            .expect_with("'}'", |k| matches!(k, TokenKind::RightBrace))?
+            .span;
         Ok(EnumDef {
             attributes,
             name,
@@ -263,7 +278,9 @@ impl<'a> Parser<'a> {
             self.expect_with("';'", |k| matches!(k, TokenKind::Semicolon))?;
             methods.push(sig);
         }
-        let end = self.expect_with("'}'", |k| matches!(k, TokenKind::RightBrace))?.span;
+        let end = self
+            .expect_with("'}'", |k| matches!(k, TokenKind::RightBrace))?
+            .span;
         Ok(TraitDef {
             attributes,
             name,
@@ -287,7 +304,9 @@ impl<'a> Parser<'a> {
             let attrs = self.parse_attributes()?;
             methods.push(self.parse_function(attrs)?);
         }
-        let end = self.expect_with("'}'", |k| matches!(k, TokenKind::RightBrace))?.span;
+        let end = self
+            .expect_with("'}'", |k| matches!(k, TokenKind::RightBrace))?
+            .span;
         Ok(ImplBlock {
             attributes,
             trait_type,
@@ -299,7 +318,9 @@ impl<'a> Parser<'a> {
 
     fn parse_extern(&mut self, attributes: Vec<Attribute>) -> Result<ExternFunction, ParseError> {
         let start = self.expect_keyword(Keyword::Extern)?.span;
-        let abi_token = self.expect_with("string literal ABI", |k| matches!(k, TokenKind::StringLiteral(_)))?;
+        let abi_token = self.expect_with("string literal ABI", |k| {
+            matches!(k, TokenKind::StringLiteral(_))
+        })?;
         let abi = if let TokenKind::StringLiteral(value) = abi_token.kind.clone() {
             value
         } else {
@@ -403,7 +424,9 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            let end = self.expect_with("';'", |k| matches!(k, TokenKind::Semicolon))?.span;
+            let end = self
+                .expect_with("';'", |k| matches!(k, TokenKind::Semicolon))?
+                .span;
             Ok(Stmt::Return {
                 value,
                 span: start.merge(end),
@@ -442,10 +465,7 @@ impl<'a> Parser<'a> {
             let start = self.prev().span;
             let body = self.parse_block()?;
             let span = start.merge(body.span);
-            Ok(Stmt::Unsafe {
-                body,
-                span,
-            })
+            Ok(Stmt::Unsafe { body, span })
         } else if self.match_keyword(Keyword::Assembly) {
             self.parse_assembly()
         } else if self.check(|k| matches!(k, TokenKind::LeftBrace)) {
@@ -477,7 +497,9 @@ impl<'a> Parser<'a> {
         self.expect_with("'='", |k| matches!(k, TokenKind::Equals))?;
         let value = self.parse_expression()?;
         span = span.merge(value.span());
-        let end = self.expect_with("';'", |k| matches!(k, TokenKind::Semicolon))?.span;
+        let end = self
+            .expect_with("';'", |k| matches!(k, TokenKind::Semicolon))?
+            .span;
         span = span.merge(end);
         Ok(Stmt::VarDecl(VarDecl {
             kind,
@@ -537,7 +559,9 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        let end = self.expect_with("'}'", |k| matches!(k, TokenKind::RightBrace))?.span;
+        let end = self
+            .expect_with("'}'", |k| matches!(k, TokenKind::RightBrace))?
+            .span;
         Ok(SwitchStmt {
             expr,
             arms,
@@ -619,8 +643,9 @@ impl<'a> Parser<'a> {
                                 break;
                             }
                         }
-                        let close =
-                            self.expect_with("')'", |k| matches!(k, TokenKind::RightParen))?.span;
+                        let close = self
+                            .expect_with("')'", |k| matches!(k, TokenKind::RightParen))?
+                            .span;
                         span = span.merge(close);
                         Ok(Pattern::Enum {
                             path: segments,
@@ -901,7 +926,7 @@ impl<'a> Parser<'a> {
             if self.match_with(|k| matches!(k, TokenKind::Dot | TokenKind::ColonColon)) {
                 let op_token = self.prev().clone();
                 let (member, member_span) = self.expect_identifier("member name")?;
-                
+
                 // Check if this is a method call (followed by parentheses)
                 if self.check(|k| matches!(k, TokenKind::LeftParen)) {
                     self.advance(); // consume '('
@@ -1020,14 +1045,9 @@ impl<'a> Parser<'a> {
                     span: token.span,
                 }))
             }
-            TokenKind::Keyword(Keyword::Fun) => {
-                self.parse_lambda()
-            }
+            TokenKind::Keyword(Keyword::Fun) => self.parse_lambda(),
             TokenKind::Keyword(Keyword::Async) => {
-                if matches!(
-                    self.peek_kind_at(1),
-                    Some(TokenKind::Keyword(Keyword::Fun))
-                ) {
+                if matches!(self.peek_kind_at(1), Some(TokenKind::Keyword(Keyword::Fun))) {
                     self.parse_lambda()
                 } else {
                     let span = self.advance().span;
@@ -1175,7 +1195,9 @@ impl<'a> Parser<'a> {
                 let keyword_span = self.advance().span;
                 self.expect_with("'<'", |k| matches!(k, TokenKind::Less))?;
                 let inner = self.parse_type()?;
-                let close = self.expect_with("'>'", |k| matches!(k, TokenKind::Greater))?.span;
+                let close = self
+                    .expect_with("'>'", |k| matches!(k, TokenKind::Greater))?
+                    .span;
                 Ok(TypeExpr::Slice {
                     element: Box::new(inner),
                     span: keyword_span.merge(close),
@@ -1194,7 +1216,9 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
-                let close = self.expect_with("')'", |k| matches!(k, TokenKind::RightParen))?.span;
+                let close = self
+                    .expect_with("')'", |k| matches!(k, TokenKind::RightParen))?
+                    .span;
                 Ok(TypeExpr::Tuple {
                     elements,
                     span: keyword_span.merge(close),
@@ -1214,7 +1238,9 @@ impl<'a> Parser<'a> {
                 .ok_or(ParseError::InvalidArraySize {
                     span: size_token.span,
                 })?;
-                let close = self.expect_with("']'", |k| matches!(k, TokenKind::RightBracket))?.span;
+                let close = self
+                    .expect_with("']'", |k| matches!(k, TokenKind::RightBracket))?
+                    .span;
                 Ok(TypeExpr::Array {
                     element: Box::new(element),
                     size,
@@ -1309,7 +1335,10 @@ impl<'a> Parser<'a> {
     }
 
     fn expect_keyword(&mut self, keyword: Keyword) -> Result<Token, ParseError> {
-        self.expect_with("keyword", |k| matches!(k, TokenKind::Keyword(kw) if *kw == keyword))
+        self.expect_with(
+            "keyword",
+            |k| matches!(k, TokenKind::Keyword(kw) if *kw == keyword),
+        )
     }
 
     fn expect_with<F>(&mut self, expected: &'static str, predicate: F) -> Result<Token, ParseError>
@@ -1328,10 +1357,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect_identifier(
-        &mut self,
-        context: &'static str,
-    ) -> Result<(String, Span), ParseError> {
+    fn expect_identifier(&mut self, context: &'static str) -> Result<(String, Span), ParseError> {
         let token = self.expect_with(context, |k| matches!(k, TokenKind::Identifier(_)))?;
         if let TokenKind::Identifier(name) = token.kind.clone() {
             Ok((name, token.span))
@@ -1399,7 +1425,10 @@ impl<'a> Parser<'a> {
 
     fn synchronize_top(&mut self) {
         while !self.is_at_end() {
-            if matches!(self.prev().kind, TokenKind::Semicolon | TokenKind::RightBrace) {
+            if matches!(
+                self.prev().kind,
+                TokenKind::Semicolon | TokenKind::RightBrace
+            ) {
                 return;
             }
             match self.peek().kind {

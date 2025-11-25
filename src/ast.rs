@@ -127,14 +127,29 @@ pub struct Block {
 pub enum Stmt {
     VarDecl(VarDecl),
     Expr(Expr),
-    Return { value: Option<Expr>, span: Span },
+    Return {
+        value: Option<Expr>,
+        span: Span,
+    },
     If(IfStmt),
-    While { condition: Expr, body: Block, span: Span },
-    For { var: String, iterable: Expr, body: Block, span: Span },
+    While {
+        condition: Expr,
+        body: Block,
+        span: Span,
+    },
+    For {
+        var: String,
+        iterable: Expr,
+        body: Block,
+        span: Span,
+    },
     Switch(SwitchStmt),
     Try(TryCatch),
     Block(Block),
-    Unsafe { body: Block, span: Span },
+    Unsafe {
+        body: Block,
+        span: Span,
+    },
     Assembly(AssemblyBlock),
 }
 
@@ -178,9 +193,17 @@ pub struct SwitchArm {
 
 #[derive(Debug, Clone)]
 pub enum Pattern {
-    Wildcard { span: Span },
-    Binding { name: String, span: Span },
-    Path { segments: Vec<String>, span: Span },
+    Wildcard {
+        span: Span,
+    },
+    Binding {
+        name: String,
+        span: Span,
+    },
+    Path {
+        segments: Vec<String>,
+        span: Span,
+    },
     Enum {
         path: Vec<String>,
         bindings: Vec<String>,
@@ -222,7 +245,10 @@ pub struct AssemblyBlock {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Literal(Literal),
-    Identifier { name: String, span: Span },
+    Identifier {
+        name: String,
+        span: Span,
+    },
     Access {
         base: Box<Expr>,
         member: String,

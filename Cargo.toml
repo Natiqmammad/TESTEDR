@@ -2,6 +2,7 @@
 name = "NightScript"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [lib]
 name = "nightscript_android"
@@ -23,6 +24,12 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 jni = "0.21"
 lazy_static = "1.4"
+
+[features]
+default = []
+real_flutter_engine = []
+tokio = []
+rayon = []
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21", default-features = true }

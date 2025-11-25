@@ -1,13 +1,15 @@
+#![cfg(target_os = "android")]
+
 // JNI Bridge for Android Platform Integration
 // Complete implementation using jni crate for ApexForge NightScript Android Runtime
 
-use jni::JNIEnv;
-use jni::objects::{JClass, JObject, JString, JValue, GlobalRef};
-use jni::sys::{jboolean, jint, jlong, jstring, jobject};
-use jni::JavaVM;
-use std::sync::{Arc, Mutex, RwLock, Once};
-use std::collections::HashMap;
 use crate::runtime::{RuntimeError, RuntimeResult};
+use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
+use jni::sys::{jboolean, jint, jlong, jobject, jstring};
+use jni::JNIEnv;
+use jni::JavaVM;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Once, RwLock};
 
 // ========================================
 // Global JNI State
@@ -81,7 +83,9 @@ impl AndroidJNIBridge {
     pub fn initialize(&mut self) -> RuntimeResult<()> {
         unsafe {
             if JVM_INSTANCE.is_none() {
-                return Err(RuntimeError::new("JVM not initialized - call JNI_OnLoad first"));
+                return Err(RuntimeError::new(
+                    "JVM not initialized - call JNI_OnLoad first",
+                ));
             }
         }
 
@@ -100,20 +104,24 @@ impl AndroidJNIBridge {
         }
 
         let jvm = unsafe {
-            JVM_INSTANCE.as_ref()
+            JVM_INSTANCE
+                .as_ref()
                 .ok_or_else(|| RuntimeError::new("JVM not available"))?
         };
 
-        let env = jvm.attach_current_thread()
+        let env = jvm
+            .attach_current_thread()
             .map_err(|e| RuntimeError::new(&format!("Failed to attach thread: {}", e)))?;
 
         let activity = unsafe {
-            ACTIVITY_INSTANCE.as_ref()
+            ACTIVITY_INSTANCE
+                .as_ref()
                 .ok_or_else(|| RuntimeError::new("Activity not available"))?
         };
 
         // Call showToast method
-        let j_message = env.new_string(message)
+        let j_message = env
+            .new_string(message)
             .map_err(|e| RuntimeError::new(&format!("Failed to create string: {}", e)))?;
 
         env.call_method(
@@ -137,30 +145,36 @@ impl AndroidJNIBridge {
         }
 
         let jvm = unsafe {
-            JVM_INSTANCE.as_ref()
+            JVM_INSTANCE
+                .as_ref()
                 .ok_or_else(|| RuntimeError::new("JVM not available"))?
         };
 
-        let env = jvm.attach_current_thread()
+        let env = jvm
+            .attach_current_thread()
             .map_err(|e| RuntimeError::new(&format!("Failed to attach thread: {}", e)))?;
 
         let activity = unsafe {
-            ACTIVITY_INSTANCE.as_ref()
+            ACTIVITY_INSTANCE
+                .as_ref()
                 .ok_or_else(|| RuntimeError::new("Activity not available"))?
         };
 
-        let j_permission = env.new_string(permission)
+        let j_permission = env
+            .new_string(permission)
             .map_err(|e| RuntimeError::new(&format!("Failed to create string: {}", e)))?;
 
-        let result = env.call_method(
-            activity.as_obj(),
-            "requestPermission",
-            "(Ljava/lang/String;)Z",
-            &[JValue::Object(j_permission.into())],
-        )
-        .map_err(|e| RuntimeError::new(&format!("Failed to call requestPermission: {}", e)))?;
+        let result = env
+            .call_method(
+                activity.as_obj(),
+                "requestPermission",
+                "(Ljava/lang/String;)Z",
+                &[JValue::Object(j_permission.into())],
+            )
+            .map_err(|e| RuntimeError::new(&format!("Failed to call requestPermission: {}", e)))?;
 
-        let granted = result.z()
+        let granted = result
+            .z()
             .map_err(|e| RuntimeError::new(&format!("Failed to get boolean result: {}", e)))?;
 
         self.permissions.insert(permission.to_string(), granted);
@@ -182,60 +196,80 @@ impl AndroidJNIBridge {
         }
 
         let jvm = unsafe {
-            JVM_INSTANCE.as_ref()
+            JVM_INSTANCE
+                .as_ref()
                 .ok_or_else(|| RuntimeError::new("JVM not available"))?
         };
 
-        let env = jvm.attach_current_thread()
+        let env = jvm
+            .attach_current_thread()
             .map_err(|e| RuntimeError::new(&format!("Failed to attach thread: {}", e)))?;
 
         let activity = unsafe {
-            ACTIVITY_INSTANCE.as_ref()
+            ACTIVITY_INSTANCE
+                .as_ref()
                 .ok_or_else(|| RuntimeError::new("Activity not available"))?
         };
 
-        let j_permission = env.new_string(permission)
+        let j_permission = env
+            .new_string(permission)
             .map_err(|e| RuntimeError::new(&format!("Failed to create string: {}", e)))?;
 
-        let result = env.call_method(
-            activity.as_obj(),
-            "isPermissionGranted",
-            "(Ljava/lang/String;)Z",
-            &[JValue::Object(j_permission.into())],
-        )
-        .map_err(|e| RuntimeError::new(&format!("Failed to call isPermissionGranted: {}", e)))?;
+        let result = env
+            .call_method(
+                activity.as_obj(),
+                "isPermissionGranted",
+                "(Ljava/lang/String;)Z",
+                &[JValue::Object(j_permission.into())],
+            )
+            .map_err(|e| {
+                RuntimeError::new(&format!("Failed to call isPermissionGranted: {}", e))
+            })?;
 
-        let granted = result.z()
+        let granted = result
+            .z()
             .map_err(|e| RuntimeError::new(&format!("Failed to get boolean result: {}", e)))?;
 
-        println!("[ANDROID-JNI] Permission {} is {}", permission, if granted { "granted" } else { "denied" });
+        println!(
+            "[ANDROID-JNI] Permission {} is {}",
+            permission,
+            if granted { "granted" } else { "denied" }
+        );
         Ok(granted)
     }
 
     /// Send intent
     pub fn send_intent(&self, action: &str, extras: &str) -> RuntimeResult<()> {
         if !self.is_connected {
-            println!("[ANDROID-FALLBACK] Intent: {} with extras: {}", action, extras);
+            println!(
+                "[ANDROID-FALLBACK] Intent: {} with extras: {}",
+                action, extras
+            );
             return Ok(());
         }
 
         let jvm = unsafe {
-            JVM_INSTANCE.as_ref()
+            JVM_INSTANCE
+                .as_ref()
                 .ok_or_else(|| RuntimeError::new("JVM not available"))?
         };
 
-        let env = jvm.attach_current_thread()
+        let env = jvm
+            .attach_current_thread()
             .map_err(|e| RuntimeError::new(&format!("Failed to attach thread: {}", e)))?;
 
         let activity = unsafe {
-            ACTIVITY_INSTANCE.as_ref()
+            ACTIVITY_INSTANCE
+                .as_ref()
                 .ok_or_else(|| RuntimeError::new("Activity not available"))?
         };
 
-        let j_action = env.new_string(action)
+        let j_action = env
+            .new_string(action)
             .map_err(|e| RuntimeError::new(&format!("Failed to create action string: {}", e)))?;
 
-        let j_extras = env.new_string(extras)
+        let j_extras = env
+            .new_string(extras)
             .map_err(|e| RuntimeError::new(&format!("Failed to create extras string: {}", e)))?;
 
         env.call_method(
@@ -249,7 +283,10 @@ impl AndroidJNIBridge {
         )
         .map_err(|e| RuntimeError::new(&format!("Failed to call sendIntent: {}", e)))?;
 
-        println!("[ANDROID-JNI] Intent sent: {} with extras: {}", action, extras);
+        println!(
+            "[ANDROID-JNI] Intent sent: {} with extras: {}",
+            action, extras
+        );
         Ok(())
     }
 
@@ -260,30 +297,38 @@ impl AndroidJNIBridge {
         }
 
         let jvm = unsafe {
-            JVM_INSTANCE.as_ref()
+            JVM_INSTANCE
+                .as_ref()
                 .ok_or_else(|| RuntimeError::new("JVM not available"))?
         };
 
-        let env = jvm.attach_current_thread()
+        let env = jvm
+            .attach_current_thread()
             .map_err(|e| RuntimeError::new(&format!("Failed to attach thread: {}", e)))?;
 
         let activity = unsafe {
-            ACTIVITY_INSTANCE.as_ref()
+            ACTIVITY_INSTANCE
+                .as_ref()
                 .ok_or_else(|| RuntimeError::new("Activity not available"))?
         };
 
-        let result = env.call_method(
-            activity.as_obj(),
-            "getInternalStoragePath",
-            "()Ljava/lang/String;",
-            &[],
-        )
-        .map_err(|e| RuntimeError::new(&format!("Failed to call getInternalStoragePath: {}", e)))?;
+        let result = env
+            .call_method(
+                activity.as_obj(),
+                "getInternalStoragePath",
+                "()Ljava/lang/String;",
+                &[],
+            )
+            .map_err(|e| {
+                RuntimeError::new(&format!("Failed to call getInternalStoragePath: {}", e))
+            })?;
 
-        let j_string = result.l()
+        let j_string = result
+            .l()
             .map_err(|e| RuntimeError::new(&format!("Failed to get string object: {}", e)))?;
 
-        let path: String = env.get_string(j_string.into())
+        let path: String = env
+            .get_string(j_string.into())
             .map_err(|e| RuntimeError::new(&format!("Failed to convert string: {}", e)))?
             .into();
 
@@ -298,30 +343,38 @@ impl AndroidJNIBridge {
         }
 
         let jvm = unsafe {
-            JVM_INSTANCE.as_ref()
+            JVM_INSTANCE
+                .as_ref()
                 .ok_or_else(|| RuntimeError::new("JVM not available"))?
         };
 
-        let env = jvm.attach_current_thread()
+        let env = jvm
+            .attach_current_thread()
             .map_err(|e| RuntimeError::new(&format!("Failed to attach thread: {}", e)))?;
 
         let activity = unsafe {
-            ACTIVITY_INSTANCE.as_ref()
+            ACTIVITY_INSTANCE
+                .as_ref()
                 .ok_or_else(|| RuntimeError::new("Activity not available"))?
         };
 
-        let result = env.call_method(
-            activity.as_obj(),
-            "getExternalStoragePath",
-            "()Ljava/lang/String;",
-            &[],
-        )
-        .map_err(|e| RuntimeError::new(&format!("Failed to call getExternalStoragePath: {}", e)))?;
+        let result = env
+            .call_method(
+                activity.as_obj(),
+                "getExternalStoragePath",
+                "()Ljava/lang/String;",
+                &[],
+            )
+            .map_err(|e| {
+                RuntimeError::new(&format!("Failed to call getExternalStoragePath: {}", e))
+            })?;
 
-        let j_string = result.l()
+        let j_string = result
+            .l()
             .map_err(|e| RuntimeError::new(&format!("Failed to get string object: {}", e)))?;
 
-        let path: String = env.get_string(j_string.into())
+        let path: String = env
+            .get_string(j_string.into())
             .map_err(|e| RuntimeError::new(&format!("Failed to convert string: {}", e)))?
             .into();
 
@@ -355,10 +408,8 @@ impl Default for AndroidJNIBridge {
 pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) -> jint {
     println!("[ANDROID-JNI] JNI_OnLoad called");
 
-    INIT.call_once(|| {
-        unsafe {
-            JVM_INSTANCE = Some(Arc::new(vm));
-        }
+    INIT.call_once(|| unsafe {
+        JVM_INSTANCE = Some(Arc::new(vm));
     });
 
     println!("[ANDROID-JNI] JVM initialized successfully");
@@ -463,7 +514,10 @@ pub extern "system" fn Java_com_nightscript_afns_NativeBridge_nativeCallFunction
         }
     };
 
-    println!("[ANDROID-JNI] Calling function: {} with args: {}", fn_name, args);
+    println!(
+        "[ANDROID-JNI] Calling function: {} with args: {}",
+        fn_name, args
+    );
 
     let result = format!(r#"{{"status":"success","result":null}}"#);
 
@@ -495,7 +549,10 @@ pub extern "system" fn Java_com_nightscript_afns_NativeBridge_nativeSendMessage(
         Err(_) => return std::ptr::null_mut(),
     };
 
-    println!("[ANDROID-JNI] Message on channel '{}': {}", channel_str, message_str);
+    println!(
+        "[ANDROID-JNI] Message on channel '{}': {}",
+        channel_str, message_str
+    );
 
     let response = format!(r#"{{"status":"received","channel":"{}"}}"#, channel_str);
 
@@ -705,15 +762,24 @@ pub extern "system" fn Java_com_nightscript_afns_AFNSActivity_onNativePermission
     let permission_str: String = match env.get_string(permission) {
         Ok(s) => s.into(),
         Err(e) => {
-            println!("[ANDROID-JNI] ERROR: Failed to get permission string: {}", e);
+            println!(
+                "[ANDROID-JNI] ERROR: Failed to get permission string: {}",
+                e
+            );
             return;
         }
     };
 
     let is_granted = granted != 0;
-    println!("[ANDROID-JNI] Permission result: {} -> {}", permission_str, is_granted);
+    println!(
+        "[ANDROID-JNI] Permission result: {} -> {}",
+        permission_str, is_granted
+    );
 
-    PERMISSION_STATE.lock().unwrap().insert(permission_str, is_granted);
+    PERMISSION_STATE
+        .lock()
+        .unwrap()
+        .insert(permission_str, is_granted);
 }
 
 #[no_mangle]
@@ -739,7 +805,10 @@ pub extern "system" fn Java_com_nightscript_afns_AFNSActivity_onNativeIntentRece
         }
     };
 
-    println!("[ANDROID-JNI] Intent received: {} with extras: {}", action_str, extras_str);
+    println!(
+        "[ANDROID-JNI] Intent received: {} with extras: {}",
+        action_str, extras_str
+    );
 }
 
 #[no_mangle]

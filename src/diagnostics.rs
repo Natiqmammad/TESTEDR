@@ -86,15 +86,14 @@ fn format_with_span(source: &str, span: Option<Span>, message: &str) -> String {
         let caret = format!(
             "{}{}",
             " ".repeat(caret_offset),
-            "^".repeat(cmp::min(pointer_len, line_str.len().saturating_sub(caret_offset).max(1)))
+            "^".repeat(cmp::min(
+                pointer_len,
+                line_str.len().saturating_sub(caret_offset).max(1)
+            ))
         );
         format!(
             "error: {message}\n --> line {}, column {}\n{:>4} | {}\n     | {}\n",
-            span.line,
-            span.column,
-            span.line,
-            line_str,
-            caret
+            span.line, span.column, span.line, line_str, caret
         )
     } else {
         format!("error: {message}")

@@ -2,19 +2,18 @@
 // This file exposes the public API for the NightScript runtime,
 // especially for Android JNI integration
 
+pub mod ast;
+pub mod diagnostics;
+pub mod flutter;
 pub mod lexer;
 pub mod parser;
-pub mod ast;
 pub mod runtime;
-pub mod token;
 pub mod span;
-pub mod diagnostics;
+pub mod token;
 
 // Re-export commonly used types
-pub use runtime::{Interpreter, Value, RuntimeError, RuntimeResult};
-pub use parser::Parser;
-pub use lexer::Lexer;
 pub use ast::*;
+pub use runtime::{Interpreter, RuntimeError, RuntimeResult, Value};
 
 // Android JNI module (only compiled for Android)
 #[cfg(target_os = "android")]
@@ -59,6 +58,7 @@ pub struct BuildInfo {
 }
 
 fn get_enabled_features() -> Vec<String> {
+    #[allow(unused_mut)]
     let mut features = vec!["core".to_string()];
 
     #[cfg(feature = "tokio")]

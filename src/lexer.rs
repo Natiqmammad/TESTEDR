@@ -111,7 +111,12 @@ impl<'a> Lexer<'a> {
                     }
                     '@' => self.simple_token(TokenKind::At),
                     other => {
-                        let span = Span::new(self.index, self.index + other.len_utf8(), self.line, self.column);
+                        let span = Span::new(
+                            self.index,
+                            self.index + other.len_utf8(),
+                            self.line,
+                            self.column,
+                        );
                         return Err(LexError::UnexpectedChar { ch: other, span });
                     }
                 }
@@ -133,7 +138,12 @@ impl<'a> Lexer<'a> {
         while let Some(ch) = self.peek_char() {
             if is_ident_char(ch) {
                 if !ch.is_ascii() {
-                    let span = Span::new(self.index, self.index + ch.len_utf8(), self.line, self.column);
+                    let span = Span::new(
+                        self.index,
+                        self.index + ch.len_utf8(),
+                        self.line,
+                        self.column,
+                    );
                     return Err(LexError::NonAsciiIdentifierChar { ch, span });
                 }
                 ident.push(ch);
@@ -291,7 +301,8 @@ impl<'a> Lexer<'a> {
                     }
                     Some('*') => {
                         ate = true;
-                        let start_span = Span::new(self.index, self.index + 2, self.line, self.column);
+                        let start_span =
+                            Span::new(self.index, self.index + 2, self.line, self.column);
                         self.advance_char();
                         self.advance_char();
                         let mut closed = false;

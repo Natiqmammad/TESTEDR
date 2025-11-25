@@ -7,11 +7,20 @@ use std::time::Duration;
 
 use crate::ast::{Block, Expr, File, Item, Literal, Param, Pattern, Stmt, SwitchStmt, TryCatch};
 
+#[cfg(target_os = "android")]
 pub mod android;
+#[cfg(not(target_os = "android"))]
+pub mod android {
+    use super::Value;
+
+    pub fn create_android_module() -> Value {
+        Value::Null
+    }
+}
 pub mod flutter;
-pub mod flutter_vm;
 pub mod flutter_layers;
 pub mod flutter_scene;
+pub mod flutter_vm;
 pub mod web;
 
 #[derive(Debug)]
@@ -34,7 +43,9 @@ impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RuntimeError::Message(msg) => write!(f, "{msg}"),
-            RuntimeError::Propagate(value) => write!(f, "propagated error: {}", value.to_string_value()),
+            RuntimeError::Propagate(value) => {
+                write!(f, "propagated error: {}", value.to_string_value())
+            }
         }
     }
 }
@@ -156,16 +167,9 @@ pub struct FutureValue {
 enum FutureKind {
     UserFunction(UserFunction, Option<Vec<Value>>),
     Sleep(u64),
-    Timeout {
-        duration_ms: u64,
-        callback: Value,
-    },
-    Parallel {
-        tasks: Vec<Value>,
-    },
-    Race {
-        tasks: Vec<Value>,
-    },
+    Timeout { duration_ms: u64, callback: Value },
+    Parallel { tasks: Vec<Value> },
+    Race { tasks: Vec<Value> },
 }
 
 impl FutureValue {
@@ -232,19 +236,19 @@ impl FutureValue {
                 // Execute tasks in parallel using rayon
                 let results: Result<Vec<Value>, RuntimeError> = tasks
                     .iter()
-                    .map(|task| {
-                        match task {
-                            Value::Closure(closure) => interp.call_closure(closure.clone(), Vec::new()),
-                            Value::Function(func) => interp.call_user_function(func.clone(), Vec::new()),
-                            _ => Err(RuntimeError::new("Expected callable in parallel task")),
+                    .map(|task| match task {
+                        Value::Closure(closure) => interp.call_closure(closure.clone(), Vec::new()),
+                        Value::Function(func) => {
+                            interp.call_user_function(func.clone(), Vec::new())
                         }
+                        _ => Err(RuntimeError::new("Expected callable in parallel task")),
                     })
                     .collect();
                 Value::Vec(Rc::new(RefCell::new(results?)))
             }
             FutureKind::Race { tasks } => {
                 // Execute first task that completes successfully
-                let mut last_error = RuntimeError::new("All race tasks failed");
+                let last_error = RuntimeError::new("All race tasks failed");
                 for task in tasks {
                     match task {
                         Value::Closure(closure) => {
@@ -255,7 +259,8 @@ impl FutureValue {
                             }
                         }
                         Value::Function(func) => {
-                            if let Ok(result) = interp.call_user_function(func.clone(), Vec::new()) {
+                            if let Ok(result) = interp.call_user_function(func.clone(), Vec::new())
+                            {
                                 self.completed = true;
                                 self.result = Some(Box::new(result.clone()));
                                 return Ok(result);
@@ -371,7 +376,8 @@ impl Value {
                 if e.payload.is_empty() {
                     e.variant.clone()
                 } else {
-                    let payload = e.payload
+                    let payload = e
+                        .payload
                         .iter()
                         .map(|v| v.to_string_value())
                         .collect::<Vec<_>>()
@@ -431,11 +437,7 @@ impl Interpreter {
         self.load_functions(ast)
     }
 
-    pub fn call_function_by_name(
-        &mut self,
-        name: &str,
-        args: Vec<Value>,
-    ) -> RuntimeResult<Value> {
+    pub fn call_function_by_name(&mut self, name: &str, args: Vec<Value>) -> RuntimeResult<Value> {
         let value = self.globals.get(name)?;
         self.invoke(value, args)
     }
@@ -468,8 +470,7 @@ impl Interpreter {
                     body: func.body.clone(),
                     is_async: func.signature.is_async,
                 });
-                self.globals
-                    .define(func.signature.name.clone(), value);
+                self.globals.define(func.signature.name.clone(), value);
             }
         }
         Ok(())
@@ -535,7 +536,9 @@ impl Interpreter {
                 }
                 Ok(ExecSignal::None)
             }
-            Stmt::While { condition, body, .. } => {
+            Stmt::While {
+                condition, body, ..
+            } => {
                 while self.eval_expr(condition, env)?.is_truthy() {
                     let signal = self.execute_block(body, env.clone())?;
                     if let ExecSignal::Return(_) = signal {
@@ -544,7 +547,12 @@ impl Interpreter {
                 }
                 Ok(ExecSignal::None)
             }
-            Stmt::For { var, iterable, body, .. } => {
+            Stmt::For {
+                var,
+                iterable,
+                body,
+                ..
+            } => {
                 let iterable_value = self.eval_expr(iterable, env)?;
                 let items = self.collect_iterable(iterable_value)?;
                 println!("debug for items len {}", items.len());
@@ -639,7 +647,9 @@ impl Interpreter {
         match expr {
             Expr::Literal(lit) => self.eval_literal(lit),
             Expr::Identifier { name, .. } => env.get(name),
-            Expr::Binary { left, op, right, .. } => {
+            Expr::Binary {
+                left, op, right, ..
+            } => {
                 let l = self.eval_expr(left, env)?;
                 let r = self.eval_expr(right, env)?;
                 self.eval_binary(*op, l, r)
@@ -699,9 +709,9 @@ impl Interpreter {
                     Value::Result(ResultValue::Ok(inner)) => Ok(*inner),
                     Value::Result(ResultValue::Err(err)) => Err(RuntimeError::propagate(*err)),
                     Value::Option(OptionValue::Some(inner)) => Ok(*inner),
-                    Value::Option(OptionValue::None) => Err(RuntimeError::propagate(Value::Option(
-                        OptionValue::None,
-                    ))),
+                    Value::Option(OptionValue::None) => {
+                        Err(RuntimeError::propagate(Value::Option(OptionValue::None)))
+                    }
                     _ => Err(RuntimeError::new("`?` expects result<T,E> or option<T>")),
                 }
             }
@@ -746,16 +756,23 @@ impl Interpreter {
                         s.chars()
                             .nth(idx)
                             .map(|c| Value::String(c.to_string()))
-                            .ok_or_else(|| RuntimeError::new(format!("String index {idx} out of bounds")))
+                            .ok_or_else(|| {
+                                RuntimeError::new(format!("String index {idx} out of bounds"))
+                            })
                     }
                     _ => Err(RuntimeError::new(
                         "Indexing supported only on vec and string",
                     )),
                 }
             }
-            Expr::MethodCall { object, method, args, .. } => {
+            Expr::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
                 let object_val = self.eval_expr(object, env)?;
-                
+
                 // If object is a module, call the method directly on the module
                 if let Value::Module(m) = &object_val {
                     let mut evaluated_args = Vec::new();
@@ -766,26 +783,29 @@ impl Interpreter {
                         return func(self, &evaluated_args);
                     } else {
                         return Err(RuntimeError::new(format!(
-                            "Unknown method `{method}` on module {}", m.name
+                            "Unknown method `{method}` on module {}",
+                            m.name
                         )));
                     }
                 }
-                
+
                 // Otherwise, convert method call to module function call
                 // e.g., obj.push(x) -> vec.push(obj, x)
                 let mut evaluated_args = vec![object_val.clone()];
                 for arg in args {
                     evaluated_args.push(self.eval_expr(arg, env)?);
                 }
-                
+
                 let module_name = match &object_val {
                     Value::Vec(_) => "vec",
                     Value::String(_) => "str",
                     Value::Map(_) => "map",
                     Value::Set(_) => "set",
-                    _ => return Err(RuntimeError::new(format!(
-                        "Method `{method}` not supported on this type"
-                    ))),
+                    _ => {
+                        return Err(RuntimeError::new(format!(
+                            "Method `{method}` not supported on this type"
+                        )))
+                    }
                 };
                 let module = env.get(module_name)?;
                 if let Value::Module(m) = module {
@@ -800,17 +820,11 @@ impl Interpreter {
                     Err(RuntimeError::new(format!("{module_name} is not a module")))
                 }
             }
-            Expr::Lambda(lambda_expr) => {
-                Ok(Value::Closure(ClosureValue {
-                    params: lambda_expr
-                        .params
-                        .iter()
-                        .map(|p| p.name.clone())
-                        .collect(),
-                    body: lambda_expr.body.clone(),
-                    is_async: lambda_expr.is_async,
-                }))
-            }
+            Expr::Lambda(lambda_expr) => Ok(Value::Closure(ClosureValue {
+                params: lambda_expr.params.iter().map(|p| p.name.clone()).collect(),
+                body: lambda_expr.body.clone(),
+                is_async: lambda_expr.is_async,
+            })),
             other => Err(RuntimeError::new(format!(
                 "Expression not supported in runtime yet: {other:?}"
             ))),
@@ -821,15 +835,15 @@ impl Interpreter {
         match lit {
             Literal::Integer { value, .. } => {
                 let cleaned = value.replace('_', "");
-                let parsed = cleaned.parse::<i64>().map_err(|_| {
-                    RuntimeError::new(format!("Invalid integer literal `{value}`"))
-                })?;
+                let parsed = cleaned
+                    .parse::<i64>()
+                    .map_err(|_| RuntimeError::new(format!("Invalid integer literal `{value}`")))?;
                 Ok(Value::Int(parsed))
             }
             Literal::Float { value, .. } => {
-                let parsed = value.parse::<f64>().map_err(|_| {
-                    RuntimeError::new(format!("Invalid float literal `{value}`"))
-                })?;
+                let parsed = value
+                    .parse::<f64>()
+                    .map_err(|_| RuntimeError::new(format!("Invalid float literal `{value}`")))?;
                 Ok(Value::Float(parsed))
             }
             Literal::String { value, .. } => Ok(Value::String(value.clone())),
@@ -887,7 +901,9 @@ impl Interpreter {
                 _ => Err(RuntimeError::new("Unary - expects number")),
             },
             Not => Ok(Value::Bool(!value.is_truthy())),
-            Borrow => Err(RuntimeError::new("borrow operator not supported in runtime yet")),
+            Borrow => Err(RuntimeError::new(
+                "borrow operator not supported in runtime yet",
+            )),
         }
     }
 
@@ -897,7 +913,11 @@ impl Interpreter {
             (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
             (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 + b)),
             (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + b as f64)),
-            (a, b) => Ok(Value::String(format!("{}{}", a.to_string_value(), b.to_string_value()))),
+            (a, b) => Ok(Value::String(format!(
+                "{}{}",
+                a.to_string_value(),
+                b.to_string_value()
+            ))),
         }
     }
 
@@ -991,9 +1011,7 @@ impl Interpreter {
                 if a.len() != b.len() {
                     return false;
                 }
-                a.iter()
-                    .zip(b.iter())
-                    .all(|(x, y)| self.values_equal(x, y))
+                a.iter().zip(b.iter()).all(|(x, y)| self.values_equal(x, y))
             }
             (Value::Closure(_), Value::Closure(_)) => false, // Closures are never equal
             _ => false,
@@ -1126,8 +1144,14 @@ fn register_builtins(env: &Env) {
                 map.insert("replace".to_string(), Value::Builtin(builtin_str_replace));
                 map.insert("find".to_string(), Value::Builtin(builtin_str_find));
                 map.insert("contains".to_string(), Value::Builtin(builtin_str_contains));
-                map.insert("starts_with".to_string(), Value::Builtin(builtin_str_starts_with));
-                map.insert("ends_with".to_string(), Value::Builtin(builtin_str_ends_with));
+                map.insert(
+                    "starts_with".to_string(),
+                    Value::Builtin(builtin_str_starts_with),
+                );
+                map.insert(
+                    "ends_with".to_string(),
+                    Value::Builtin(builtin_str_ends_with),
+                );
                 map
             },
         }),
@@ -1164,7 +1188,10 @@ fn register_builtins(env: &Env) {
                 let mut map = HashMap::new();
                 map.insert("sleep".to_string(), Value::Builtin(builtin_async_sleep));
                 map.insert("timeout".to_string(), Value::Builtin(builtin_async_timeout));
-                map.insert("parallel".to_string(), Value::Builtin(builtin_async_parallel));
+                map.insert(
+                    "parallel".to_string(),
+                    Value::Builtin(builtin_async_parallel),
+                );
                 map.insert("race".to_string(), Value::Builtin(builtin_async_race));
                 map.insert("all".to_string(), Value::Builtin(builtin_async_all));
                 map.insert("any".to_string(), Value::Builtin(builtin_async_any));
@@ -1204,13 +1231,10 @@ fn register_builtins(env: &Env) {
             },
         }),
     );
-    
+
     // Phase 4: Android Platform with JNI
-    env.define(
-        "android",
-        android::create_android_module(),
-    );
-    
+    env.define("android", android::create_android_module());
+
     // Phase 4: Flutter Platform
     env.define(
         "flutter",
@@ -1218,23 +1242,50 @@ fn register_builtins(env: &Env) {
             name: "flutter".to_string(),
             fields: {
                 let mut map = HashMap::new();
-                map.insert("run_app".to_string(), Value::Builtin(flutter_vm::builtin_flutter_run_app));
-                map.insert("build_widget".to_string(), Value::Builtin(flutter_vm::builtin_flutter_build_widget));
-                map.insert("render".to_string(), Value::Builtin(flutter_vm::builtin_flutter_render));
-                map.insert("emit_event".to_string(), Value::Builtin(flutter_vm::builtin_flutter_emit_event));
+                map.insert(
+                    "run_app".to_string(),
+                    Value::Builtin(flutter_vm::builtin_flutter_run_app),
+                );
+                map.insert(
+                    "build_widget".to_string(),
+                    Value::Builtin(flutter_vm::builtin_flutter_build_widget),
+                );
+                map.insert(
+                    "add_child".to_string(),
+                    Value::Builtin(flutter_vm::builtin_flutter_add_child),
+                );
+                map.insert(
+                    "render".to_string(),
+                    Value::Builtin(flutter_vm::builtin_flutter_render),
+                );
+                map.insert(
+                    "emit_event".to_string(),
+                    Value::Builtin(flutter_vm::builtin_flutter_emit_event),
+                );
+                map.insert(
+                    "window_metrics".to_string(),
+                    Value::Builtin(flutter_vm::builtin_flutter_window_metrics),
+                );
+                map.insert(
+                    "pointer_event".to_string(),
+                    Value::Builtin(flutter_vm::builtin_flutter_pointer_event),
+                );
                 map
             },
         }),
     );
-    
-    // Phase 4: Web Platform  
+
+    // Phase 4: Web Platform
     env.define(
         "web",
         Value::Module(ModuleValue {
             name: "web".to_string(),
             fields: {
                 let mut map = HashMap::new();
-                map.insert("listen".to_string(), Value::Builtin(web::builtin_web_listen));
+                map.insert(
+                    "listen".to_string(),
+                    Value::Builtin(web::builtin_web_listen),
+                );
                 map.insert("route".to_string(), Value::Builtin(web::builtin_web_route));
                 map.insert("serve".to_string(), Value::Builtin(web::builtin_web_serve));
                 map
@@ -1262,7 +1313,9 @@ fn builtin_panic(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Val
 }
 
 fn builtin_math_sqrt(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    let v = args.get(0).ok_or_else(|| RuntimeError::new("sqrt requires one argument"))?;
+    let v = args
+        .get(0)
+        .ok_or_else(|| RuntimeError::new("sqrt requires one argument"))?;
     let num = match v {
         Value::Int(i) => *i as f64,
         Value::Float(f) => *f,
@@ -1298,7 +1351,11 @@ fn builtin_vec_pop(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<V
 fn builtin_vec_len(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 1, "vec.len")?;
     let vec_rc = expect_vec(&args[0])?;
-    Ok(Value::Int(vec_rc.borrow().len() as i64))
+    let len = {
+        let vec_ref = vec_rc.borrow();
+        vec_ref.len() as i64
+    };
+    Ok(Value::Int(len))
 }
 
 fn builtin_str_len(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
@@ -1349,7 +1406,9 @@ fn builtin_str_find(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<
     let s = expect_string(&args[0])?;
     let needle = expect_string(&args[1])?;
     match s.find(&needle) {
-        Some(idx) => Ok(Value::Option(OptionValue::Some(Box::new(Value::Int(idx as i64))))),
+        Some(idx) => Ok(Value::Option(OptionValue::Some(Box::new(Value::Int(
+            idx as i64,
+        ))))),
         None => Ok(Value::Option(OptionValue::None)),
     }
 }
@@ -1398,7 +1457,9 @@ fn builtin_option_none(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResu
 fn builtin_async_sleep(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 1, "async.sleep")?;
     let duration = expect_int(&args[0])?;
-    Ok(Value::Future(Box::new(FutureValue::new_sleep(duration as u64))))
+    Ok(Value::Future(Box::new(FutureValue::new_sleep(
+        duration as u64,
+    ))))
 }
 
 fn builtin_async_timeout(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
@@ -1415,7 +1476,11 @@ fn builtin_async_parallel(_interp: &mut Interpreter, args: &[Value]) -> RuntimeR
     ensure_arity(args, 1, "async.parallel")?;
     let tasks = match &args[0] {
         Value::Vec(vec_rc) => vec_rc.borrow().clone(),
-        _ => return Err(RuntimeError::new("async.parallel expects a vector of tasks")),
+        _ => {
+            return Err(RuntimeError::new(
+                "async.parallel expects a vector of tasks",
+            ))
+        }
     };
     Ok(Value::Future(Box::new(FutureValue {
         completed: false,
@@ -1467,17 +1532,19 @@ fn builtin_vec_sort(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<
     ensure_arity(args, 1, "vec.sort")?;
     let vec_rc = expect_vec(&args[0])?;
     let mut vec_mut = vec_rc.borrow_mut();
-    vec_mut.sort_by(|a, b| {
-        match (a, b) {
-            (Value::Int(x), Value::Int(y)) => x.cmp(y),
-            (Value::Float(x), Value::Float(y)) => {
-                if x < y { std::cmp::Ordering::Less }
-                else if x > y { std::cmp::Ordering::Greater }
-                else { std::cmp::Ordering::Equal }
+    vec_mut.sort_by(|a, b| match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+        (Value::Float(x), Value::Float(y)) => {
+            if x < y {
+                std::cmp::Ordering::Less
+            } else if x > y {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
             }
-            (Value::String(x), Value::String(y)) => x.cmp(y),
-            _ => std::cmp::Ordering::Equal,
         }
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        _ => std::cmp::Ordering::Equal,
     });
     Ok(Value::Null)
 }
@@ -1576,8 +1643,12 @@ fn builtin_map_get(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<V
     ensure_arity(args, 2, "map.get")?;
     let map_rc = expect_map(&args[0])?;
     let key = expect_string(&args[1])?;
-    match map_rc.borrow().get(&key) {
-        Some(val) => Ok(Value::Option(OptionValue::Some(Box::new(val.clone())))),
+    let result = {
+        let map_ref = map_rc.borrow();
+        map_ref.get(&key).cloned()
+    };
+    match result {
+        Some(val) => Ok(Value::Option(OptionValue::Some(Box::new(val)))),
         None => Ok(Value::Option(OptionValue::None)),
     }
 }
@@ -1586,7 +1657,11 @@ fn builtin_map_remove(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResul
     ensure_arity(args, 2, "map.remove")?;
     let map_rc = expect_map(&args[0])?;
     let key = expect_string(&args[1])?;
-    match map_rc.borrow_mut().remove(&key) {
+    let removed = {
+        let mut map_ref = map_rc.borrow_mut();
+        map_ref.remove(&key)
+    };
+    match removed {
         Some(val) => Ok(Value::Option(OptionValue::Some(Box::new(val)))),
         None => Ok(Value::Option(OptionValue::None)),
     }
@@ -1595,29 +1670,31 @@ fn builtin_map_remove(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResul
 fn builtin_map_keys(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 1, "map.keys")?;
     let map_rc = expect_map(&args[0])?;
-    let keys: Vec<Value> = map_rc
-        .borrow()
-        .keys()
-        .map(|k| Value::String(k.clone()))
-        .collect();
+    let keys: Vec<Value> = {
+        let map_ref = map_rc.borrow();
+        map_ref.keys().map(|k| Value::String(k.clone())).collect()
+    };
     Ok(Value::Vec(Rc::new(RefCell::new(keys))))
 }
 
 fn builtin_map_values(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 1, "map.values")?;
     let map_rc = expect_map(&args[0])?;
-    let values: Vec<Value> = map_rc
-        .borrow()
-        .values()
-        .cloned()
-        .collect();
+    let values: Vec<Value> = {
+        let map_ref = map_rc.borrow();
+        map_ref.values().cloned().collect()
+    };
     Ok(Value::Vec(Rc::new(RefCell::new(values))))
 }
 
 fn builtin_map_len(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 1, "map.len")?;
     let map_rc = expect_map(&args[0])?;
-    Ok(Value::Int(map_rc.borrow().len() as i64))
+    let len = {
+        let map_ref = map_rc.borrow();
+        map_ref.len() as i64
+    };
+    Ok(Value::Int(len))
 }
 
 fn expect_set(value: &Value) -> RuntimeResult<Rc<RefCell<Vec<Value>>>> {
@@ -1674,5 +1751,9 @@ fn builtin_set_contains(_interp: &mut Interpreter, args: &[Value]) -> RuntimeRes
 fn builtin_set_len(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 1, "set.len")?;
     let set_rc = expect_set(&args[0])?;
-    Ok(Value::Int(set_rc.borrow().len() as i64))
+    let len = {
+        let set_ref = set_rc.borrow();
+        set_ref.len() as i64
+    };
+    Ok(Value::Int(len))
 }
