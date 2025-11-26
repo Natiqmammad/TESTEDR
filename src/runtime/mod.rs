@@ -1232,6 +1232,56 @@ fn register_builtins(env: &Env) {
         }),
     );
 
+    // Phase 2 UI core (stub bindings; actual rendering wired later)
+    fn builtin_ui_run_app(_interp: &mut Interpreter, _args: &[Value]) -> RuntimeResult<Value> {
+        println!("[ui] run_app stub invoked");
+        Ok(Value::Null)
+    }
+    fn builtin_ui_text(_interp: &mut Interpreter, _args: &[Value]) -> RuntimeResult<Value> {
+        println!("[ui] text stub");
+        Ok(Value::Null)
+    }
+    fn builtin_ui_button(_interp: &mut Interpreter, _args: &[Value]) -> RuntimeResult<Value> {
+        println!("[ui] button stub");
+        Ok(Value::Null)
+    }
+    fn builtin_ui_column(_interp: &mut Interpreter, _args: &[Value]) -> RuntimeResult<Value> {
+        println!("[ui] column stub");
+        Ok(Value::Null)
+    }
+    fn builtin_ui_row(_interp: &mut Interpreter, _args: &[Value]) -> RuntimeResult<Value> {
+        println!("[ui] row stub");
+        Ok(Value::Null)
+    }
+    fn builtin_ui_spacer(_interp: &mut Interpreter, _args: &[Value]) -> RuntimeResult<Value> {
+        println!("[ui] spacer stub");
+        Ok(Value::Null)
+    }
+    fn builtin_ui_container(_interp: &mut Interpreter, _args: &[Value]) -> RuntimeResult<Value> {
+        println!("[ui] container stub");
+        Ok(Value::Null)
+    }
+    env.define(
+        "ui",
+        Value::Module(ModuleValue {
+            name: "ui".to_string(),
+            fields: {
+                let mut map = HashMap::new();
+                map.insert("run_app".to_string(), Value::Builtin(builtin_ui_run_app));
+                map.insert("text".to_string(), Value::Builtin(builtin_ui_text));
+                map.insert("button".to_string(), Value::Builtin(builtin_ui_button));
+                map.insert("column".to_string(), Value::Builtin(builtin_ui_column));
+                map.insert("row".to_string(), Value::Builtin(builtin_ui_row));
+                map.insert("spacer".to_string(), Value::Builtin(builtin_ui_spacer));
+                map.insert(
+                    "container".to_string(),
+                    Value::Builtin(builtin_ui_container),
+                );
+                map
+            },
+        }),
+    );
+
     // Phase 4: Android Platform with JNI
     env.define("android", android::create_android_module());
 

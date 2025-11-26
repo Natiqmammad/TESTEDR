@@ -2,18 +2,33 @@
 //! Creates a GLFW window, wires OpenGL callbacks, runs FlutterEngine,
 //! and displays the default white frame (no Dart/framework).
 
+macro_rules! log_host {
+    ($($arg:tt)*) => {
+        println!("[host] {}", format!($($arg)*));
+    }
+}
+
 use anyhow::{Context, Result};
 use glfw::{Context as _, Glfw, GlfwReceiver, PWindow, WindowEvent, WindowHint};
 use libc::{c_int, c_void};
 use libloading::Library;
+use nightscript_android::ui::input::PointerState;
+use nightscript_android::ui::runtime_bridge::DrawRect;
+use nightscript_android::ui::widget::ButtonState;
+use nightscript_android::ui::{
+    build_draw_list, ui_get_snapshot_for_render, ui_mark_dirty, ui_pointer_event, ui_set_root_tree,
+    ui_set_window_size, Context as UiContext, PointerPhase, WidgetTree,
+};
+use nightscript_android::{lexer, parser, runtime};
 use std::ffi::{CStr, CString};
+use std::fs;
 use std::mem;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::thread;
-use std::time::Duration;
 use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ------------------------------
 // Host state
@@ -24,6 +39,8 @@ enum MainThreadTask {
     ClearCurrent(mpsc::Sender<bool>),
     Present(mpsc::Sender<bool>),
     GetFbo(mpsc::Sender<u32>),
+    Draw(ButtonState, mpsc::Sender<bool>),
+    DrawRects(Vec<DrawRect>, (i32, i32), mpsc::Sender<bool>),
 }
 
 struct HostContext {
@@ -32,12 +49,26 @@ struct HostContext {
     events: GlfwReceiver<(f64, WindowEvent)>,
     framebuffer_id: u32,
     engine: *mut FlutterEngine,
+    button: ButtonState,
+    pointer: PointerState,
     cmd_tx: mpsc::Sender<MainThreadTask>,
     cmd_rx: mpsc::Receiver<MainThreadTask>,
 }
 
 fn glfw_error_callback(error: glfw::Error, description: String) {
     eprintln!("[host] GLFW error ({error:?}): {description}");
+}
+
+fn ui_run_afml_file(path: &str) -> Result<()> {
+    let source = fs::read_to_string(path)
+        .with_context(|| format!("failed to read source file {}", path))?;
+    let tokens = lexer::lex(&source)?;
+    let ast = parser::parse_tokens(&source, tokens)?;
+    let mut interpreter = runtime::Interpreter::new();
+    interpreter
+        .run(&ast)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    Ok(())
 }
 
 impl HostContext {
@@ -48,8 +79,8 @@ impl HostContext {
             );
         }
 
-        let mut glfw =
-            glfw::init(glfw_error_callback).context("Initializing GLFW (needs libxrandr-dev, libxi-dev, etc.)")?;
+        let mut glfw = glfw::init(glfw_error_callback)
+            .context("Initializing GLFW (needs libxrandr-dev, libxi-dev, etc.)")?;
 
         glfw.window_hint(WindowHint::ContextVersion(3, 3));
         glfw.window_hint(WindowHint::OpenGlProfile(glfw::OpenGlProfileHint::Core));
@@ -65,12 +96,27 @@ impl HostContext {
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
 
+        // propagate initial window size to UI bridge
+        ui_set_window_size(width as f32, height as f32);
+
         Ok(Self {
             glfw,
             window,
             events,
             framebuffer_id: 0,
             engine: ptr::null_mut(),
+            button: ButtonState {
+                pressed: false,
+                x: 200.0,
+                y: 200.0,
+                w: 200.0,
+                h: 80.0,
+            },
+            pointer: PointerState {
+                mouse_x: 0.0,
+                mouse_y: 0.0,
+                mouse_down: false,
+            },
             cmd_tx,
             cmd_rx,
         })
@@ -78,9 +124,33 @@ impl HostContext {
 
     fn poll_events(&mut self) {
         self.glfw.poll_events();
-        for (_, event) in glfw::flush_messages(&self.events) {
+        let pending: Vec<_> = glfw::flush_messages(&self.events).collect();
+        for (_, event) in pending {
             if matches!(event, WindowEvent::Close) {
                 self.window.set_should_close(true);
+            }
+
+            match event {
+                WindowEvent::CursorPos(x, y) => {
+                    self.pointer.mouse_x = x;
+                    self.pointer.mouse_y = y;
+                    self.update_button_state_from_mouse();
+                    self.send_pointer_event(FlutterPointerPhase::Hover);
+                    ui_pointer_event(PointerPhase::Hover, x, y);
+                }
+                WindowEvent::MouseButton(glfw::MouseButton::Button1, glfw::Action::Press, _) => {
+                    self.pointer.mouse_down = true;
+                    self.update_button_state_from_mouse();
+                    self.send_pointer_event(FlutterPointerPhase::Down);
+                    ui_pointer_event(PointerPhase::Down, self.pointer.mouse_x, self.pointer.mouse_y);
+                }
+                WindowEvent::MouseButton(glfw::MouseButton::Button1, glfw::Action::Release, _) => {
+                    self.pointer.mouse_down = false;
+                    self.update_button_state_from_mouse();
+                    self.send_pointer_event(FlutterPointerPhase::Up);
+                    ui_pointer_event(PointerPhase::Up, self.pointer.mouse_x, self.pointer.mouse_y);
+                }
+                _ => {}
             }
         }
 
@@ -101,8 +171,63 @@ impl HostContext {
                 MainThreadTask::GetFbo(reply) => {
                     let _ = reply.send(self.framebuffer_id);
                 }
+                MainThreadTask::Draw(button, reply) => {
+                    draw_button_gl(button);
+                    let _ = reply.send(true);
+                }
+                MainThreadTask::DrawRects(rects, viewport, reply) => {
+                    draw_rects_gl(&rects, viewport);
+                    let _ = reply.send(true);
+                }
             }
         }
+    }
+
+    fn update_button_state_from_mouse(&mut self) {
+        let inside = self
+            .button
+            .contains(self.pointer.mouse_x, self.pointer.mouse_y);
+        if self.pointer.mouse_down && inside {
+            self.button.pressed = true;
+        } else {
+            self.button.pressed = false;
+        }
+    }
+
+    fn send_pointer_event(&self, phase: FlutterPointerPhase) {
+        if self.engine.is_null() {
+            return;
+        }
+        let phase = phase;
+        let buttons = if self.pointer.mouse_down {
+            kFlutterPointerButtonMousePrimary
+        } else {
+            0
+        };
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| Duration::from_micros(0))
+            .as_micros() as usize;
+        let event = FlutterPointerEvent {
+            struct_size: mem::size_of::<FlutterPointerEvent>(),
+            phase,
+            timestamp,
+            x: self.pointer.mouse_x,
+            y: self.pointer.mouse_y,
+            device: 0,
+            signal_kind: FlutterPointerSignalKind::None,
+            scroll_delta_x: 0.0,
+            scroll_delta_y: 0.0,
+            device_kind: FlutterPointerDeviceKind::Mouse,
+            buttons,
+            pan_x: 0.0,
+            pan_y: 0.0,
+            scale: 1.0,
+            rotation: 0.0,
+            view_id: 0,
+        };
+        let res = unsafe { FlutterEngineSendPointerEvent(self.engine, &event as *const _, 1) };
+        println!("[host] SendPointerEvent -> {:?}", res);
     }
 }
 
@@ -188,6 +313,22 @@ type FlutterBoolPresentInfoCallback =
     unsafe extern "C" fn(*mut c_void, *const FlutterPresentInfo) -> bool;
 type FlutterFrameBufferWithDamageCallback =
     unsafe extern "C" fn(*mut c_void, isize, *mut FlutterDamage);
+type FlutterVsyncCallback = unsafe extern "C" fn(*mut c_void, isize);
+
+#[repr(C)]
+pub struct FlutterSceneBuilder {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct FlutterScene {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct FlutterPicture {
+    _private: [u8; 0],
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -230,6 +371,7 @@ pub struct FlutterProjectArgs {
     pub custom_task_runners: *const FlutterCustomTaskRunners,
     pub shutdown_dart_vm_when_done: bool,
     pub user_data: *mut c_void,
+    pub vsync_callback: Option<FlutterVsyncCallback>,
 }
 
 #[repr(C)]
@@ -261,6 +403,63 @@ pub struct FlutterEngine {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+pub enum FlutterPointerSignalKind {
+    None = 0,
+    Scroll = 1,
+    Unknown = 2,
+    Scale = 3,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub enum FlutterPointerPhase {
+    Cancel = 0,
+    Up = 1,
+    Down = 2,
+    Move = 3,
+    Add = 4,
+    Remove = 5,
+    Hover = 6,
+    PanZoomStart = 7,
+    PanZoomUpdate = 8,
+    PanZoomEnd = 9,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub enum FlutterPointerDeviceKind {
+    Mouse = 1,
+    Touch = 2,
+    Stylus = 3,
+    Trackpad = 4,
+}
+
+pub const kFlutterPointerButtonMousePrimary: i64 = 1 << 0;
+pub const kFlutterPointerButtonMouseSecondary: i64 = 1 << 1;
+pub const kFlutterPointerButtonMouseMiddle: i64 = 1 << 2;
+
+#[repr(C)]
+pub struct FlutterPointerEvent {
+    pub struct_size: usize,
+    pub phase: FlutterPointerPhase,
+    pub timestamp: usize,
+    pub x: f64,
+    pub y: f64,
+    pub device: i32,
+    pub signal_kind: FlutterPointerSignalKind,
+    pub scroll_delta_x: f64,
+    pub scroll_delta_y: f64,
+    pub device_kind: FlutterPointerDeviceKind,
+    pub buttons: i64,
+    pub pan_x: f64,
+    pub pan_y: f64,
+    pub scale: f64,
+    pub rotation: f64,
+    pub view_id: i64,
+}
+
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlutterEngineResult {
     Success = 0,
@@ -283,12 +482,95 @@ extern "C" {
         engine: *mut *mut FlutterEngine,
     ) -> FlutterEngineResult;
 
-    pub fn FlutterEngineShutdown(engine: *mut FlutterEngine) -> FlutterEngineResult;
+pub fn FlutterEngineShutdown(engine: *mut FlutterEngine) -> FlutterEngineResult;
 
-    pub fn FlutterEngineSendWindowMetricsEvent(
-        engine: *mut FlutterEngine,
-        event: *const FlutterWindowMetricsEvent,
-    ) -> FlutterEngineResult;
+pub fn FlutterEngineSendWindowMetricsEvent(
+    engine: *mut FlutterEngine,
+    event: *const FlutterWindowMetricsEvent,
+) -> FlutterEngineResult;
+
+pub fn FlutterEngineSendPointerEvent(
+    engine: *mut FlutterEngine,
+    events: *const FlutterPointerEvent,
+    events_count: usize,
+) -> FlutterEngineResult;
+
+pub fn FlutterEngineScheduleFrame(engine: *mut FlutterEngine) -> FlutterEngineResult;
+pub fn FlutterEngineOnVsync(
+    engine: *mut FlutterEngine,
+    baton: isize,
+    frame_start_time_nanos: u64,
+    frame_target_time_nanos: u64,
+) -> FlutterEngineResult;
+}
+
+static mut ENGINE_HANDLE: *mut FlutterEngine = ptr::null_mut();
+
+extern "C" fn on_platform_message(
+    _message: *const FlutterPlatformMessage,
+    _userdata: *mut c_void,
+) {
+    log_host!("platform_message_callback");
+}
+
+extern "C" fn vsync_callback(user_data: *mut c_void, baton: isize) {
+    log_host!("vsync_callback baton={baton}");
+    let _ = user_data; // currently unused
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_millis(0));
+    let frame_start = now.as_nanos() as u64;
+    let frame_target = frame_start + 16_000_000;
+    unsafe {
+        if !ENGINE_HANDLE.is_null() {
+            let res = FlutterEngineOnVsync(ENGINE_HANDLE, baton, frame_start, frame_target);
+            log_host!("FlutterEngineOnVsync -> {:?}", res);
+        }
+    }
+}
+
+fn draw_button_gl(button: ButtonState) {
+    unsafe {
+        gl::Viewport(0, 0, 800, 600);
+        gl::Disable(gl::SCISSOR_TEST);
+        gl::ClearColor(1.0, 1.0, 1.0, 1.0);
+        gl::Clear(gl::COLOR_BUFFER_BIT);
+
+        let color = if button.pressed {
+            [0.9, 0.3, 0.3, 1.0]
+        } else {
+            [0.2, 0.4, 0.9, 1.0]
+        };
+
+        gl::Enable(gl::SCISSOR_TEST);
+        gl::Scissor(
+            button.x as i32,
+            button.y as i32,
+            button.w as i32,
+            button.h as i32,
+        );
+        gl::ClearColor(color[0], color[1], color[2], color[3]);
+        gl::Clear(gl::COLOR_BUFFER_BIT);
+        gl::Disable(gl::SCISSOR_TEST);
+    }
+}
+
+fn draw_rects_gl(rects: &[nightscript_android::ui::runtime_bridge::DrawRect], viewport: (i32, i32)) {
+    log_host!("draw_rects_gl: {} rects", rects.len());
+    unsafe {
+        gl::Viewport(0, 0, viewport.0, viewport.1);
+        gl::Disable(gl::SCISSOR_TEST);
+        // clear to blue for debug visibility
+        gl::ClearColor(0.2, 0.3, 0.8, 1.0);
+        gl::Clear(gl::COLOR_BUFFER_BIT);
+        for rect in rects {
+            gl::Enable(gl::SCISSOR_TEST);
+            gl::Scissor(rect.x as i32, rect.y as i32, rect.w as i32, rect.h as i32);
+            gl::ClearColor(rect.color[0], rect.color[1], rect.color[2], rect.color[3]);
+            gl::Clear(gl::COLOR_BUFFER_BIT);
+            gl::Disable(gl::SCISSOR_TEST);
+        }
+    }
 }
 
 // ------------------------------
@@ -300,7 +582,7 @@ unsafe extern "C" fn make_current(user_data: *mut c_void) -> bool {
     let (tx, rx) = mpsc::channel();
     let _ = host.cmd_tx.send(MainThreadTask::MakeCurrent(tx));
     let ok = rx.recv().unwrap_or(false);
-    println!("[host] make_current (main thread) -> {ok}");
+    log_host!("make_current (main thread) -> {ok}");
     ok
 }
 
@@ -310,7 +592,7 @@ unsafe extern "C" fn clear_current(_user_data: *mut c_void) -> bool {
     let (tx, rx) = mpsc::channel();
     let _ = host.cmd_tx.send(MainThreadTask::ClearCurrent(tx));
     let ok = rx.recv().unwrap_or(false);
-    println!("[host] clear_current (main thread) -> {ok}");
+    log_host!("clear_current (main thread) -> {ok}");
     ok
 }
 
@@ -319,7 +601,7 @@ unsafe extern "C" fn present(user_data: *mut c_void) -> bool {
     let (tx, rx) = mpsc::channel();
     let _ = host.cmd_tx.send(MainThreadTask::Present(tx));
     let ok = rx.recv().unwrap_or(false);
-    println!("[host] present (main thread) -> {ok}");
+    log_host!("present (main thread) -> {ok}");
     ok
 }
 
@@ -328,17 +610,13 @@ unsafe extern "C" fn fbo_callback(user_data: *mut c_void) -> u32 {
     let (tx, rx) = mpsc::channel();
     let _ = host.cmd_tx.send(MainThreadTask::GetFbo(tx));
     let id = rx.recv().unwrap_or(0);
-    println!("[host] fbo_callback -> {id}");
+    log_host!("fbo_callback -> {id}");
     id
 }
 
-unsafe extern "C" fn make_resource_current(user_data: *mut c_void) -> bool {
-    let host = &mut *(user_data as *mut HostContext);
-    let (tx, rx) = mpsc::channel();
-    let _ = host.cmd_tx.send(MainThreadTask::MakeCurrent(tx));
-    let ok = rx.recv().unwrap_or(false);
-    println!("[host] make_resource_current (main thread) -> {ok}");
-    ok
+unsafe extern "C" fn make_resource_current(_user_data: *mut c_void) -> bool {
+    println!("[host] make_resource_current (noop)");
+    true
 }
 
 unsafe extern "C" fn gl_proc_resolver(user_data: *mut c_void, name: *const c_char) -> *mut c_void {
@@ -347,7 +625,10 @@ unsafe extern "C" fn gl_proc_resolver(user_data: *mut c_void, name: *const c_cha
     let s = cname.to_str().unwrap_or_default();
     // Avoid returning bogus pointers for EGL symbols on GLX.
     if s.starts_with("egl") {
-        println!("[host] gl_proc_resolver: {} -> NULL (unsupported on GLX)", s);
+        println!(
+            "[host] gl_proc_resolver: {} -> NULL (unsupported on GLX)",
+            s
+        );
         return ptr::null_mut();
     }
     let ptr = host.window.get_proc_address(s);
@@ -360,6 +641,28 @@ unsafe extern "C" fn surface_transform_identity(_user_data: *mut c_void) -> Flut
         scale_x: 1.0,
         scale_y: 1.0,
         ..FlutterTransformation::default()
+    }
+}
+
+unsafe extern "C" fn render_frame(user_data: *mut c_void) {
+    let host = &mut *(user_data as *mut HostContext);
+    log_host!("render_frame_callback begin");
+
+    // Debug: clear to blue every frame to prove render path runs
+    let viewport = host.window.get_size();
+    let (tx, rx) = mpsc::channel();
+    let _ = host
+        .cmd_tx
+        .send(MainThreadTask::DrawRects(Vec::new(), viewport, tx));
+    let _ = rx.recv();
+    log_host!("debug frame: cleared screen to blue");
+
+    // Schedule next frame
+    unsafe {
+        if !ENGINE_HANDLE.is_null() {
+            let res = FlutterEngineScheduleFrame(ENGINE_HANDLE);
+            log_host!("FlutterEngineScheduleFrame (render) -> {:?}", res);
+        }
     }
 }
 
@@ -454,12 +757,13 @@ fn build_project_args(
         icu_data_path: icu_c.as_ptr(),
         command_line_argc: 0,
         command_line_argv: ptr::null(),
-        platform_message_callback: None,
+        platform_message_callback: Some(on_platform_message),
         update_semantics_callback: None,
-        render_frame_callback: None,
+        render_frame_callback: Some(render_frame),
         custom_task_runners: ptr::null(),
         shutdown_dart_vm_when_done: false,
         user_data,
+        vsync_callback: Some(vsync_callback),
     };
 
     (args, assets_c, icu_c)
@@ -475,6 +779,26 @@ fn main() -> Result<()> {
     println!("[host] Engine dir: {}", paths.engine_dir.display());
     println!("[host] Assets dir: {}", paths.assets.display());
     println!("[host] ICU file: {}", paths.icu.display());
+
+    // If an AFML file path is passed as the first CLI arg, run it to build the UI tree.
+    // Otherwise, inject a simple test UI.
+    if let Some(arg_path) = std::env::args().nth(1) {
+        if let Err(err) = ui_run_afml_file(&arg_path) {
+            eprintln!("[host] Failed to run AFML file {arg_path}: {err}");
+        } else {
+            println!("[host] Loaded UI from AFML: {arg_path}");
+        }
+    } else {
+        let mut tree = WidgetTree::new();
+        let mut ctx = UiContext::new(&mut tree);
+        let title = ctx.text("Hello NightScript");
+        let button = ctx.button("Click Me");
+        let root = ctx.column(&[title, button]);
+        tree.add_child(tree.root(), root.0);
+        ui_set_root_tree(tree);
+        ui_mark_dirty();
+        println!("[host] Injected fallback test UI");
+    }
 
     let renderer_config = renderer_config();
     let (project_args, _assets_c, _icu_c) =
@@ -496,6 +820,9 @@ fn main() -> Result<()> {
         return Err(anyhow::anyhow!("FlutterEngineRun failed: {:?}", run_result));
     }
     host.engine = engine;
+    unsafe {
+        ENGINE_HANDLE = engine;
+    }
 
     let metrics = FlutterWindowMetricsEvent {
         struct_size: mem::size_of::<FlutterWindowMetricsEvent>(),
@@ -515,10 +842,29 @@ fn main() -> Result<()> {
             metrics_result
         ));
     }
+    unsafe {
+        if !ENGINE_HANDLE.is_null() {
+            let res = FlutterEngineScheduleFrame(ENGINE_HANDLE);
+            println!("[host] FlutterEngineScheduleFrame (initial) -> {:?}", res);
+        } else {
+            println!("[host] ENGINE_HANDLE null before initial schedule");
+        }
+    }
 
     println!("[host] Entering event loop...");
+    log_host!("entering manual main loop");
     while !host.window.should_close() {
+        log_host!("manual loop frame");
         host.poll_events();
+        host.window.make_current();
+        unsafe {
+            gl::Viewport(0, 0, 800, 600);
+            gl::Disable(gl::BLEND);
+            gl::ClearColor(0.0, 0.0, 1.0, 1.0);
+            gl::Clear(gl::COLOR_BUFFER_BIT);
+        }
+        host.window.swap_buffers();
+        glfw::make_context_current(None);
         thread::sleep(Duration::from_millis(16));
     }
 

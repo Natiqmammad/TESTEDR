@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, non_snake_case, non_camel_case_types, non_upper_case_globals)]
 // NightScript Library Entry Point
 // This file exposes the public API for the NightScript runtime,
 // especially for Android JNI integration
@@ -10,6 +11,7 @@ pub mod parser;
 pub mod runtime;
 pub mod span;
 pub mod token;
+pub mod ui;
 
 // Re-export commonly used types
 pub use ast::*;

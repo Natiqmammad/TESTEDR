@@ -1,0 +1,19 @@
+import forge;
+import forge.ui as ui;
+
+fun apex() {
+    ui.run_app(RowApp {});
+}
+
+struct RowApp {}
+
+impl ui::App for RowApp {
+    fun build(ctx:: ui::Context) -> ui::Widget {
+        let left  = ctx.text("Left");
+        let right = ctx.text("Right");
+
+        let row = ctx.row([left, right]);
+
+        return row;
+    }
+}
