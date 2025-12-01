@@ -1,0 +1,26 @@
+import forge;
+import forge.async as async;
+import forge.log as log;
+
+async fun worker(name, ms) {
+    log.info("worker start ", name);
+    await async.sleep(ms);
+    log.info("worker end ", name);
+    return name;
+}
+
+fun apex() {
+    let task = async.spawn(worker, "spawned", 200);
+    log.info("cancel immediately");
+    async.cancel(task);
+    let status = async.is_cancelled(task);
+    log.info("is_cancelled ", status);
+
+    return async.catch(
+        task,
+        fun(err) {
+            log.info("caught cancel ", err);
+            return "cancelled";
+        },
+    );
+}

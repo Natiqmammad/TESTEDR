@@ -2,8 +2,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::ast::{Block, Expr, File, Item, Literal, Param, Pattern, Stmt, SwitchStmt, TryCatch};
 
@@ -138,6 +139,12 @@ pub enum OptionValue {
     None,
 }
 
+#[derive(Debug)]
+enum PollResult {
+    Ready(Value),
+    Pending,
+}
+
 #[derive(Clone, Debug)]
 pub struct StructInstance {
     pub fields: HashMap<String, Value>,
@@ -160,23 +167,60 @@ pub struct ClosureValue {
 pub struct FutureValue {
     completed: bool,
     result: Option<Box<Value>>,
+    cancelled: bool,
+    wake_at: Option<Instant>,
     kind: FutureKind,
 }
 
 #[derive(Clone, Debug)]
 enum FutureKind {
     UserFunction(UserFunction, Option<Vec<Value>>),
+    Callable { func: Value, args: Vec<Value> },
+    Spawn { func: Value, args: Vec<Value> },
+    Then {
+        base: Box<FutureValue>,
+        on_ok: Value,
+    },
+    Catch {
+        base: Box<FutureValue>,
+        on_err: Value,
+    },
+    Finally {
+        base: Box<FutureValue>,
+        on_finally: Value,
+    },
     Sleep(u64),
     Timeout { duration_ms: u64, callback: Value },
     Parallel { tasks: Vec<Value> },
     Race { tasks: Vec<Value> },
+    Any { tasks: Vec<Value> },
+    All { tasks: Vec<Value> },
 }
 
 impl FutureValue {
+    #[allow(dead_code)]
+    fn kind_discriminant(&self) -> &'static str {
+        match &self.kind {
+            FutureKind::UserFunction(_, _) => "UserFunction",
+            FutureKind::Callable { .. } => "Callable",
+            FutureKind::Spawn { .. } => "Spawn",
+            FutureKind::Then { .. } => "Then",
+            FutureKind::Catch { .. } => "Catch",
+            FutureKind::Finally { .. } => "Finally",
+            FutureKind::Sleep(_) => "Sleep",
+            FutureKind::Timeout { .. } => "Timeout",
+            FutureKind::Parallel { .. } => "Parallel",
+            FutureKind::Race { .. } => "Race",
+            FutureKind::All { .. } => "All",
+            FutureKind::Any { .. } => "Any",
+        }
+    }
     fn new_user(func: UserFunction, args: Vec<Value>) -> Self {
         Self {
             completed: false,
             result: None,
+            cancelled: false,
+            wake_at: None,
             kind: FutureKind::UserFunction(func, Some(args)),
         }
     }
@@ -185,6 +229,8 @@ impl FutureValue {
         Self {
             completed: false,
             result: None,
+            cancelled: false,
+            wake_at: Some(Instant::now() + Duration::from_millis(duration_ms)),
             kind: FutureKind::Sleep(duration_ms),
         }
     }
@@ -193,6 +239,8 @@ impl FutureValue {
         Self {
             completed: false,
             result: None,
+            cancelled: false,
+            wake_at: Some(Instant::now() + Duration::from_millis(duration_ms)),
             kind: FutureKind::Timeout {
                 duration_ms,
                 callback,
@@ -200,82 +248,271 @@ impl FutureValue {
         }
     }
 
-    fn block_on(mut self, interp: &mut Interpreter) -> RuntimeResult<Value> {
-        self.poll(interp)
+    fn new_callable(func: Value, args: Vec<Value>) -> Self {
+        Self {
+            completed: false,
+            result: None,
+            cancelled: false,
+            wake_at: None,
+            kind: FutureKind::Callable { func, args },
+        }
     }
 
-    fn poll(&mut self, interp: &mut Interpreter) -> RuntimeResult<Value> {
+    fn new_spawn(func: Value, args: Vec<Value>) -> Self {
+        Self {
+            completed: false,
+            result: None,
+            cancelled: false,
+            wake_at: None,
+            kind: FutureKind::Spawn { func, args },
+        }
+    }
+
+    fn new_then(base: FutureValue, on_ok: Value) -> Self {
+        Self {
+            completed: false,
+            result: None,
+            cancelled: false,
+            wake_at: None,
+            kind: FutureKind::Then {
+                base: Box::new(base),
+                on_ok,
+            },
+        }
+    }
+
+    fn new_catch(base: FutureValue, on_err: Value) -> Self {
+        Self {
+            completed: false,
+            result: None,
+            cancelled: false,
+            wake_at: None,
+            kind: FutureKind::Catch {
+                base: Box::new(base),
+                on_err,
+            },
+        }
+    }
+
+    fn new_finally(base: FutureValue, on_finally: Value) -> Self {
+        Self {
+            completed: false,
+            result: None,
+            cancelled: false,
+            wake_at: None,
+            kind: FutureKind::Finally {
+                base: Box::new(base),
+                on_finally,
+            },
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.cancelled = true;
+    }
+
+    fn block_on(mut self, interp: &mut Interpreter) -> RuntimeResult<Value> {
+        loop {
+            eprintln!("[async] block_on tick");
+            match self.poll(interp)? {
+                PollResult::Ready(v) => return Ok(v),
+                PollResult::Pending => {
+                    // simple cooperative yield; avoid blocking the executor thread
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+    }
+
+    fn poll(&mut self, interp: &mut Interpreter) -> RuntimeResult<PollResult> {
+        eprintln!(
+            "[async] poll kind={} cancelled={} completed={}",
+            self.kind_discriminant(),
+            self.cancelled,
+            self.completed
+        );
+        if self.cancelled {
+            return Err(RuntimeError::new("future cancelled"));
+        }
         if self.completed {
             return self
                 .result
                 .as_ref()
-                .map(|v| (**v).clone())
+                .map(|v| PollResult::Ready((**v).clone()))
                 .ok_or_else(|| RuntimeError::new("future completed without value"));
         }
-        let value = match &mut self.kind {
+        let poll = match &mut self.kind {
             FutureKind::UserFunction(func, args_opt) => {
                 let args = args_opt.take().unwrap_or_else(Vec::new);
-                interp.execute_user_function(func, args)?
+                PollResult::Ready(interp.execute_user_function(func, args)?)
             }
-            FutureKind::Sleep(duration_ms) => {
-                if *duration_ms > 0 {
-                    thread::sleep(Duration::from_millis(*duration_ms));
+            FutureKind::Callable { func, args } => match func {
+                Value::Function(f) => PollResult::Ready(interp.execute_user_function(f, args.clone())?),
+                Value::Closure(c) => PollResult::Ready(interp.call_closure(c.clone(), args.clone())?),
+                _ => return Err(RuntimeError::new("Expected function or closure")),
+            },
+            FutureKind::Spawn { func, args } => match func {
+                Value::Function(f) => PollResult::Ready(interp.execute_user_function(f, args.clone())?),
+                Value::Closure(c) => PollResult::Ready(interp.call_closure(c.clone(), args.clone())?),
+                _ => return Err(RuntimeError::new("Expected function or closure")),
+            },
+            FutureKind::Then { base, on_ok } => match base.poll(interp)? {
+                PollResult::Pending => PollResult::Pending,
+                PollResult::Ready(v) => PollResult::Ready(interp.invoke(on_ok.clone(), vec![v])?),
+            },
+            FutureKind::Catch { base, on_err } => match base.poll(interp) {
+                Ok(PollResult::Ready(v)) => PollResult::Ready(v),
+                Ok(PollResult::Pending) => PollResult::Pending,
+                Err(e) => {
+                    let msg = Value::String(e.to_string());
+                    PollResult::Ready(interp.invoke(on_err.clone(), vec![msg])?)
                 }
-                Value::Null
+            },
+            FutureKind::Finally { base, on_finally } => match base.poll(interp) {
+                Ok(PollResult::Ready(v)) => {
+                    let _ = interp.invoke(on_finally.clone(), Vec::new());
+                    PollResult::Ready(v)
+                }
+                Ok(PollResult::Pending) => PollResult::Pending,
+                Err(e) => {
+                    let _ = interp.invoke(on_finally.clone(), Vec::new());
+                    return Err(e);
+                }
+            },
+            FutureKind::Sleep(duration_ms) => {
+                let target = self
+                    .wake_at
+                    .get_or_insert_with(|| Instant::now() + Duration::from_millis(*duration_ms));
+                if Instant::now() >= *target {
+                    // eprintln!("[async] sleep ready after {}ms", duration_ms);
+                    PollResult::Ready(Value::Null)
+                } else {
+                    // eprintln!("[async] sleep pending remaining {:?}", *target - Instant::now());
+                    PollResult::Pending
+                }
             }
             FutureKind::Timeout {
                 duration_ms,
                 callback,
             } => {
-                if *duration_ms > 0 {
-                    thread::sleep(Duration::from_millis(*duration_ms));
+                let target = self
+                    .wake_at
+                    .get_or_insert_with(|| Instant::now() + Duration::from_millis(*duration_ms));
+                if Instant::now() >= *target {
+                    // eprintln!("[async] timeout firing after {}ms", duration_ms);
+                    PollResult::Ready(interp.invoke(callback.clone(), Vec::new())?)
+                } else {
+                    // eprintln!("[async] timeout pending remaining {:?}", *target - Instant::now());
+                    PollResult::Pending
                 }
-                interp.invoke(callback.clone(), Vec::new())?
             }
-            FutureKind::Parallel { tasks } => {
-                // Execute tasks in parallel using rayon
-                let results: Result<Vec<Value>, RuntimeError> = tasks
-                    .iter()
-                    .map(|task| match task {
-                        Value::Closure(closure) => interp.call_closure(closure.clone(), Vec::new()),
-                        Value::Function(func) => {
-                            interp.call_user_function(func.clone(), Vec::new())
-                        }
-                        _ => Err(RuntimeError::new("Expected callable in parallel task")),
-                    })
-                    .collect();
-                Value::Vec(Rc::new(RefCell::new(results?)))
+            FutureKind::Parallel { tasks } | FutureKind::All { tasks } => {
+                let mut results = Vec::with_capacity(tasks.len());
+                let mut pending = false;
+                for task in tasks.iter_mut() {
+                    match task {
+                        Value::Future(ref mut f) => match f.poll(interp)? {
+                            PollResult::Ready(v) => results.push(v),
+                            PollResult::Pending => {
+                                pending = true;
+                            }
+                        },
+                        Value::Closure(c) => results.push(interp.call_closure(c.clone(), Vec::new())?),
+                        Value::Function(func) => results.push(interp.call_user_function(func.clone(), Vec::new())?),
+                        _ => return Err(RuntimeError::new("Expected callable or future in parallel task")),
+                    };
+                }
+                if pending {
+                    PollResult::Pending
+                } else {
+                    PollResult::Ready(Value::Vec(Rc::new(RefCell::new(results))))
+                }
             }
             FutureKind::Race { tasks } => {
-                // Execute first task that completes successfully
-                let last_error = RuntimeError::new("All race tasks failed");
-                for task in tasks {
+                let mut pending_seen = false;
+                for task in tasks.iter_mut() {
                     match task {
-                        Value::Closure(closure) => {
-                            if let Ok(result) = interp.call_closure(closure.clone(), Vec::new()) {
-                                self.completed = true;
-                                self.result = Some(Box::new(result.clone()));
-                                return Ok(result);
-                            }
+                        Value::Future(ref mut f) => match f.poll(interp)? {
+                            PollResult::Ready(v) => return Ok(PollResult::Ready(v)),
+                            PollResult::Pending => pending_seen = true,
+                        },
+                        Value::Closure(c) => {
+                            let v = interp.call_closure(c.clone(), Vec::new())?;
+                            return Ok(PollResult::Ready(v));
                         }
                         Value::Function(func) => {
-                            if let Ok(result) = interp.call_user_function(func.clone(), Vec::new())
-                            {
-                                self.completed = true;
-                                self.result = Some(Box::new(result.clone()));
-                                return Ok(result);
-                            }
+                            let v = interp.call_user_function(func.clone(), Vec::new())?;
+                            return Ok(PollResult::Ready(v));
                         }
                         _ => continue,
                     }
                 }
-                return Err(last_error);
+                if pending_seen {
+                    PollResult::Pending
+                } else {
+                    return Err(RuntimeError::new("All race tasks failed or were invalid"));
+                }
+            }
+            FutureKind::Any { tasks } => {
+                let mut pending_seen = false;
+                for task in tasks.iter_mut() {
+                    match task {
+                        Value::Future(ref mut f) => match f.poll(interp)? {
+                            PollResult::Ready(v) => {
+                                for other in tasks.iter_mut() {
+                                    if let Value::Future(ref mut fut) = other {
+                                        fut.cancel();
+                                    }
+                                }
+                                return Ok(PollResult::Ready(v));
+                            }
+                            PollResult::Pending => pending_seen = true,
+                        },
+                        Value::Closure(c) => {
+                            let v = interp.call_closure(c.clone(), Vec::new())?;
+                            for other in tasks.iter_mut() {
+                                if let Value::Future(ref mut fut) = other {
+                                    fut.cancel();
+                                }
+                            }
+                            return Ok(PollResult::Ready(v));
+                        }
+                        Value::Function(func) => {
+                            let v = interp.call_user_function(func.clone(), Vec::new())?;
+                            for other in tasks.iter_mut() {
+                                if let Value::Future(ref mut fut) = other {
+                                    fut.cancel();
+                                }
+                            }
+                            return Ok(PollResult::Ready(v));
+                        }
+                        _ => continue,
+                    }
+                }
+                if pending_seen {
+                    PollResult::Pending
+                } else {
+                    return Err(RuntimeError::new("any(): all tasks failed or cancelled"));
+                }
             }
         };
-        self.completed = true;
-        self.result = Some(Box::new(value.clone()));
-        Ok(value)
+        if let PollResult::Ready(ref v) = poll {
+            self.completed = true;
+            self.result = Some(Box::new(v.clone()));
+        }
+        Ok(poll)
     }
+}
+
+static TOKIO_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+fn tokio_rt() -> &'static tokio::runtime::Runtime {
+    TOKIO_RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+    })
 }
 
 impl fmt::Debug for Value {
@@ -445,15 +682,19 @@ impl Interpreter {
     pub fn run(&mut self, ast: &File) -> RuntimeResult<()> {
         self.load_functions(ast)?;
         let apex_val = self.globals.get("apex")?;
+        eprintln!("[interp] invoking apex");
         match apex_val {
             Value::Function(func) => {
                 let result = self.call_user_function(func, Vec::new())?;
+                eprintln!("[interp] apex returned {:?}", result);
                 if let Value::Future(future) = result {
+                    eprintln!("[interp] apex is future -> block_on");
                     future.block_on(self)?;
                 }
                 Ok(())
             }
             Value::Future(future) => {
+                eprintln!("[interp] apex future directly -> block_on");
                 future.block_on(self)?;
                 Ok(())
             }
@@ -1188,6 +1429,7 @@ fn register_builtins(env: &Env) {
                 let mut map = HashMap::new();
                 map.insert("sleep".to_string(), Value::Builtin(builtin_async_sleep));
                 map.insert("timeout".to_string(), Value::Builtin(builtin_async_timeout));
+                map.insert("spawn".to_string(), Value::Builtin(builtin_async_spawn));
                 map.insert(
                     "parallel".to_string(),
                     Value::Builtin(builtin_async_parallel),
@@ -1195,6 +1437,14 @@ fn register_builtins(env: &Env) {
                 map.insert("race".to_string(), Value::Builtin(builtin_async_race));
                 map.insert("all".to_string(), Value::Builtin(builtin_async_all));
                 map.insert("any".to_string(), Value::Builtin(builtin_async_any));
+                map.insert("then".to_string(), Value::Builtin(builtin_async_then));
+                map.insert("catch".to_string(), Value::Builtin(builtin_async_catch));
+                map.insert("finally".to_string(), Value::Builtin(builtin_async_finally));
+                map.insert("cancel".to_string(), Value::Builtin(builtin_async_cancel));
+                map.insert(
+                    "is_cancelled".to_string(),
+                    Value::Builtin(builtin_async_is_cancelled),
+                );
                 map
             },
         }),
@@ -1522,6 +1772,49 @@ fn builtin_async_timeout(_interp: &mut Interpreter, args: &[Value]) -> RuntimeRe
     ))))
 }
 
+fn builtin_async_spawn(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    if args.is_empty() {
+        return Err(RuntimeError::new("async.spawn requires a function"));
+    }
+    let func = args[0].clone();
+    let fn_args = args.iter().skip(1).cloned().collect::<Vec<_>>();
+    Ok(Value::Future(Box::new(FutureValue::new_spawn(func, fn_args))))
+}
+
+fn builtin_async_then(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 2, "async.then")?;
+    let fut = expect_future(&args[0])?;
+    let cb = args[1].clone();
+    Ok(Value::Future(Box::new(FutureValue::new_then(*fut, cb))))
+}
+
+fn builtin_async_catch(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 2, "async.catch")?;
+    let fut = expect_future(&args[0])?;
+    let cb = args[1].clone();
+    Ok(Value::Future(Box::new(FutureValue::new_catch(*fut, cb))))
+}
+
+fn builtin_async_finally(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 2, "async.finally")?;
+    let fut = expect_future(&args[0])?;
+    let cb = args[1].clone();
+    Ok(Value::Future(Box::new(FutureValue::new_finally(*fut, cb))))
+}
+
+fn builtin_async_cancel(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "async.cancel")?;
+    let mut fut = expect_future(&args[0])?;
+    fut.cancel();
+    Ok(Value::Null)
+}
+
+fn builtin_async_is_cancelled(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "async.is_cancelled")?;
+    let fut = expect_future(&args[0])?;
+    Ok(Value::Bool(fut.cancelled))
+}
+
 fn builtin_async_parallel(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 1, "async.parallel")?;
     let tasks = match &args[0] {
@@ -1535,6 +1828,8 @@ fn builtin_async_parallel(_interp: &mut Interpreter, args: &[Value]) -> RuntimeR
     Ok(Value::Future(Box::new(FutureValue {
         completed: false,
         result: None,
+        cancelled: false,
+        wake_at: None,
         kind: FutureKind::Parallel { tasks },
     })))
 }
@@ -1548,6 +1843,8 @@ fn builtin_async_race(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResul
     Ok(Value::Future(Box::new(FutureValue {
         completed: false,
         result: None,
+        cancelled: false,
+        wake_at: None,
         kind: FutureKind::Race { tasks },
     })))
 }
@@ -1561,7 +1858,9 @@ fn builtin_async_all(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult
     Ok(Value::Future(Box::new(FutureValue {
         completed: false,
         result: None,
-        kind: FutureKind::Parallel { tasks },
+        cancelled: false,
+        wake_at: None,
+        kind: FutureKind::All { tasks },
     })))
 }
 
@@ -1574,7 +1873,9 @@ fn builtin_async_any(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult
     Ok(Value::Future(Box::new(FutureValue {
         completed: false,
         result: None,
-        kind: FutureKind::Race { tasks },
+        cancelled: false,
+        wake_at: None,
+        kind: FutureKind::Any { tasks },
     })))
 }
 
@@ -1664,6 +1965,15 @@ fn expect_int(value: &Value) -> RuntimeResult<i64> {
         Value::Int(i) => Ok(*i),
         Value::Float(f) => Ok(*f as i64),
         _ => Err(RuntimeError::new("Expected integer")),
+    }
+}
+
+fn expect_future(value: &Value) -> RuntimeResult<Box<FutureValue>> {
+    if let Value::Future(f) = value {
+        // We cannot clone JoinHandles; operate on a boxed clone of the inner FutureValue
+        Ok(Box::new((**f).clone()))
+    } else {
+        Err(RuntimeError::new("Expected future"))
     }
 }
 

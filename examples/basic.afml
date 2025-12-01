@@ -1,4 +1,5 @@
 import forge;
+import forge.async as async;
 import forge.log as log;
 import forge.math as math;
 
@@ -9,10 +10,15 @@ fun apex() {
 
     log.info("Circle area = ", area);
     log.info("√3 = ", root);
-
+  await work();
     if radius == 0 {
         log.info("radius is zero");
     } else {
         log.info("radius ok");
     }
+}
+
+async fun work() {
+    await async.sleep(100);
+    return 10;
 }

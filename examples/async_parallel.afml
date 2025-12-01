@@ -1,0 +1,44 @@
+import forge;
+import forge.async as async;
+import forge.log as log;
+
+async fun slow(label, ms) {
+    log.info("start ", label);
+    await async.sleep(ms);
+    log.info("finish ", label);
+    return label;
+}
+
+fun apex() {
+    let tasks = vec[
+        slow("A", 60),
+        slow("B", 120),
+        async.timeout(30, fun() { return "timeout"; }),
+    ];
+
+    let all_tasks = async.all(tasks);
+    let race_tasks = async.race(
+        vec[
+            async.sleep(10),
+            async.timeout(5, fun() { return "race"; }),
+        ],
+    );
+
+    let combined = async.then(
+        all_tasks,
+        fun(v) {
+            log.info("all done");
+            return v;
+        },
+    );
+
+    let combined2 = async.then(
+        race_tasks,
+        fun(v) {
+            log.info("race winner ", v);
+            return v;
+        },
+    );
+
+    return async.parallel(vec[combined, combined2]);
+}

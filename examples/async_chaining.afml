@@ -1,0 +1,36 @@
+import forge;
+import forge.async as async;
+import forge.log as log;
+
+async fun work() {
+    await async.sleep(1);
+    return 10;
+}
+
+fun apex() {
+    let fut = async.then(
+        work(),
+        fun(v) {
+            log.info("then value ", v);
+            return v + 1;
+        },
+    );
+
+    let fut2 = async.catch(
+        fut,
+        fun(err) {
+            log.info("caught ", err);
+            return 0;
+        },
+    );
+
+    let fut3 = async.finally(
+        fut2,
+        fun() {
+            log.info("finally");
+            return null;
+        },
+    );
+
+    return fut3;
+}

@@ -3,9 +3,12 @@
 //! and displays the default white frame (no Dart/framework).
 
 macro_rules! log_host {
-    ($($arg:tt)*) => {
-        println!("[host] {}", format!($($arg)*));
-    }
+    ($($arg:tt)*) => {{
+        use std::io::Write;
+        let msg = format!($($arg)*);
+        println!("[host] {msg}");
+        let _ = std::io::stdout().flush();
+    }};
 }
 
 use anyhow::{Context, Result};
@@ -62,6 +65,7 @@ fn glfw_error_callback(error: glfw::Error, description: String) {
 fn ui_run_afml_file(path: &str) -> Result<()> {
     let source = fs::read_to_string(path)
         .with_context(|| format!("failed to read source file {}", path))?;
+    log_host!("ui_run_afml_file reading {path}");
     let tokens = lexer::lex(&source)?;
     let ast = parser::parse_tokens(&source, tokens)?;
     let mut interpreter = runtime::Interpreter::new();
@@ -556,7 +560,7 @@ fn draw_button_gl(button: ButtonState) {
 }
 
 fn draw_rects_gl(rects: &[nightscript_android::ui::runtime_bridge::DrawRect], viewport: (i32, i32)) {
-    log_host!("draw_rects_gl: {} rects", rects.len());
+    log_host!("draw_rects_gl: {} rects (viewport {}x{})", rects.len(), viewport.0, viewport.1);
     unsafe {
         gl::Viewport(0, 0, viewport.0, viewport.1);
         gl::Disable(gl::SCISSOR_TEST);
@@ -774,19 +778,20 @@ fn build_project_args(
 // ------------------------------
 
 fn main() -> Result<()> {
+    log_host!("starting flutter_host main");
     let mut host = HostContext::new(800, 600, "AF/NS Flutter Host")?;
     let paths = EnginePaths::resolve()?;
-    println!("[host] Engine dir: {}", paths.engine_dir.display());
-    println!("[host] Assets dir: {}", paths.assets.display());
-    println!("[host] ICU file: {}", paths.icu.display());
+    log_host!("Engine dir: {}", paths.engine_dir.display());
+    log_host!("Assets dir: {}", paths.assets.display());
+    log_host!("ICU file: {}", paths.icu.display());
 
     // If an AFML file path is passed as the first CLI arg, run it to build the UI tree.
     // Otherwise, inject a simple test UI.
     if let Some(arg_path) = std::env::args().nth(1) {
         if let Err(err) = ui_run_afml_file(&arg_path) {
-            eprintln!("[host] Failed to run AFML file {arg_path}: {err}");
+            log_host!("Failed to run AFML file {arg_path}: {err}");
         } else {
-            println!("[host] Loaded UI from AFML: {arg_path}");
+            log_host!("Loaded UI from AFML: {arg_path}");
         }
     } else {
         let mut tree = WidgetTree::new();
@@ -797,7 +802,7 @@ fn main() -> Result<()> {
         tree.add_child(tree.root(), root.0);
         ui_set_root_tree(tree);
         ui_mark_dirty();
-        println!("[host] Injected fallback test UI");
+        log_host!("Injected fallback test UI");
     }
 
     let renderer_config = renderer_config();
@@ -805,7 +810,7 @@ fn main() -> Result<()> {
         build_project_args(&paths, &mut host as *mut _ as *mut c_void);
 
     let mut engine: *mut FlutterEngine = ptr::null_mut();
-    println!("[host] FlutterEngineRun...");
+    log_host!("FlutterEngineRun...");
     let run_result = unsafe {
         FlutterEngineRun(
             FLUTTER_ENGINE_VERSION,
@@ -815,7 +820,7 @@ fn main() -> Result<()> {
             &mut engine,
         )
     };
-    println!("[host] FlutterEngineRun -> {:?}", run_result);
+    log_host!("FlutterEngineRun -> {:?}", run_result);
     if run_result != FlutterEngineResult::Success {
         return Err(anyhow::anyhow!("FlutterEngineRun failed: {:?}", run_result));
     }
@@ -830,10 +835,10 @@ fn main() -> Result<()> {
         height: 600,
         pixel_ratio: 1.0,
     };
-    println!("[host] FlutterEngineSendWindowMetricsEvent...");
+    log_host!("FlutterEngineSendWindowMetricsEvent...");
     let metrics_result = unsafe { FlutterEngineSendWindowMetricsEvent(engine, &metrics) };
-    println!(
-        "[host] FlutterEngineSendWindowMetricsEvent -> {:?}",
+    log_host!(
+        "FlutterEngineSendWindowMetricsEvent -> {:?}",
         metrics_result
     );
     if metrics_result != FlutterEngineResult::Success {
@@ -845,32 +850,23 @@ fn main() -> Result<()> {
     unsafe {
         if !ENGINE_HANDLE.is_null() {
             let res = FlutterEngineScheduleFrame(ENGINE_HANDLE);
-            println!("[host] FlutterEngineScheduleFrame (initial) -> {:?}", res);
+            log_host!("FlutterEngineScheduleFrame (initial) -> {:?}", res);
         } else {
-            println!("[host] ENGINE_HANDLE null before initial schedule");
+            log_host!("ENGINE_HANDLE null before initial schedule");
         }
     }
 
-    println!("[host] Entering event loop...");
     log_host!("entering manual main loop");
     while !host.window.should_close() {
         log_host!("manual loop frame");
         host.poll_events();
-        host.window.make_current();
-        unsafe {
-            gl::Viewport(0, 0, 800, 600);
-            gl::Disable(gl::BLEND);
-            gl::ClearColor(0.0, 0.0, 1.0, 1.0);
-            gl::Clear(gl::COLOR_BUFFER_BIT);
-        }
-        host.window.swap_buffers();
-        glfw::make_context_current(None);
+        render_manual_frame(&mut host);
         thread::sleep(Duration::from_millis(16));
     }
 
-    println!("[host] FlutterEngineShutdown...");
+    log_host!("FlutterEngineShutdown...");
     let shutdown_result = unsafe { FlutterEngineShutdown(engine) };
-    println!("[host] FlutterEngineShutdown -> {:?}", shutdown_result);
+    log_host!("FlutterEngineShutdown -> {:?}", shutdown_result);
     if shutdown_result != FlutterEngineResult::Success {
         return Err(anyhow::anyhow!(
             "FlutterEngineShutdown failed: {:?}",
@@ -879,4 +875,26 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn render_manual_frame(host: &mut HostContext) {
+    host.window.make_current();
+    let (fb_w, fb_h) = host.window.get_framebuffer_size();
+    log_host!("manual_frame viewport {}x{}", fb_w, fb_h);
+
+    if let Some(snapshot) = ui_get_snapshot_for_render() {
+        log_host!("ui snapshot: {} rects", snapshot.layout.len());
+        let rects = build_draw_list(&snapshot);
+        draw_rects_gl(&rects, (fb_w, fb_h));
+    } else {
+        log_host!("ui snapshot missing, clearing blue");
+        unsafe {
+            gl::Viewport(0, 0, fb_w, fb_h);
+            gl::Disable(gl::BLEND);
+            gl::ClearColor(0.0, 0.0, 1.0, 1.0);
+            gl::Clear(gl::COLOR_BUFFER_BIT);
+        }
+    }
+    host.window.swap_buffers();
+    glfw::make_context_current(None);
 }
