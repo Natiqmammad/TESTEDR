@@ -2,25 +2,24 @@ import forge;
 import forge.async as async;
 import forge.log as log;
 
-async fun worker(name, ms) {
-    log.info("worker start ", name);
+async fun worker(name:: str, ms:: i64) {
+    log.info("[async] spawn: worker start ", name);
     await async.sleep(ms);
-    log.info("worker end ", name);
+    log.info("[async] spawn: worker end ", name);
     return name;
 }
 
 fun apex() {
-    let task = async.spawn(worker, "spawned", 200);
-    log.info("cancel immediately");
+    log.info("[async] spawn: start");
+    let task = async.spawn(worker, "spawned", 20);
+    // No real cancel propagation yet; demonstrate catch path
+    log.info("[async] spawn: cancel immediately");
     async.cancel(task);
     let status = async.is_cancelled(task);
-    log.info("is_cancelled ", status);
+    log.info("[async] spawn: is_cancelled ", status);
 
-    return async.catch(
-        task,
-        fun(err) {
-            log.info("caught cancel ", err);
-            return "cancelled";
-        },
-    );
+    return async.catch(task, fun(err) {
+        log.info("[async] spawn: caught cancel ", err);
+        return "cancelled";
+    });
 }

@@ -46,6 +46,7 @@ impl<'a> Parser<'a> {
 
         let mut items = Vec::new();
         while !self.is_at_end() {
+            let before = self.index;
             match self.parse_top_item() {
                 Ok(Some(item)) => items.push(item),
                 Ok(None) => {}
@@ -53,6 +54,14 @@ impl<'a> Parser<'a> {
                     self.record_error(err);
                     self.synchronize_top();
                 }
+            }
+            // Safety guard: ensure the parser always makes progress.
+            // If no tokens were consumed, skip one token to avoid infinite loops.
+            if self.index == before {
+                if self.is_at_end() {
+                    break;
+                }
+                self.advance();
             }
         }
 

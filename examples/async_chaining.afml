@@ -3,34 +3,34 @@ import forge.async as async;
 import forge.log as log;
 
 async fun work() {
-    await async.sleep(1);
+    log.info("[async] chaining: work start");
+    await async.sleep(5);
+    log.info("[async] chaining: work end");
     return 10;
 }
 
+fun on_then(v:: i64) {
+    log.info("[async] chaining: then value ", v);
+    return v + 1;
+}
+
+fun on_catch(err:: str) {
+    log.info("[async] chaining: caught ", err);
+    return 0;
+}
+
+fun on_finally() {
+    log.info("[async] chaining: finally");
+    return null;
+}
+
 fun apex() {
-    let fut = async.then(
-        work(),
-        fun(v) {
-            log.info("then value ", v);
-            return v + 1;
-        },
-    );
+    log.info("[async] chaining: start");
 
-    let fut2 = async.catch(
-        fut,
-        fun(err) {
-            log.info("caught ", err);
-            return 0;
-        },
-    );
+    let fut = async.then(work(), on_then);
+    let fut2 = async.catch(fut, on_catch);
+    let fut3 = async.finally(fut2, on_finally);
 
-    let fut3 = async.finally(
-        fut2,
-        fun() {
-            log.info("finally");
-            return null;
-        },
-    );
-
+    log.info("[async] chaining: returning future");
     return fut3;
 }

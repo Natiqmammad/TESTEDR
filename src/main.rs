@@ -39,9 +39,12 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
+    eprintln!("[main] start");
     let cli = Cli::parse();
     let source = read_source(cli.input.as_deref())?;
+    eprintln!("[main] source loaded ({} bytes)", source.len());
 
+    eprintln!("[main] lex start");
     let tokens = match lexer::lex(&source) {
         Ok(tokens) => tokens,
         Err(err) => {
@@ -50,6 +53,7 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
     };
+    eprintln!("[main] lex done ({} tokens)", tokens.len());
     if cli.tokens {
         println!("-- tokens --");
         for token in &tokens {
@@ -59,6 +63,7 @@ fn main() -> anyhow::Result<()> {
 
     let should_parse = cli.ast || cli.run || !cli.tokens;
     if should_parse {
+        eprintln!("[main] parse start");
         let ast = match parser::parse_tokens(&source, tokens.clone()) {
             Ok(ast) => ast,
             Err(err) => {
@@ -66,6 +71,7 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
         };
+        eprintln!("[main] parse complete");
         if cli.ast {
             println!("-- ast --");
             println!("{ast:#?}");
@@ -79,6 +85,7 @@ fn main() -> anyhow::Result<()> {
 
         if cli.run {
             let mut interpreter = runtime::Interpreter::new();
+            eprintln!("[main] interpreter created, running apex");
             if let Err(err) = interpreter.run(&ast) {
                 eprintln!("runtime error: {err}");
                 return Ok(());
