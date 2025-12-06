@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use nightscript_android::{lexer, parser};
 
 mod commands;
@@ -9,6 +9,21 @@ mod config;
 
 use commands::{build, check, clean, init, install, new, run, single, uninstall};
 use config::ApexConfig;
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum BackendArg {
+    Legacy,
+    Native,
+}
+
+impl From<BackendArg> for build::BackendKind {
+    fn from(arg: BackendArg) -> Self {
+        match arg {
+            BackendArg::Legacy => build::BackendKind::Legacy,
+            BackendArg::Native => build::BackendKind::Native,
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -42,11 +57,15 @@ enum Command {
     Build {
         #[arg(long, value_name = "DIR")]
         manifest_path: Option<PathBuf>,
+        #[arg(long, value_enum, default_value = "legacy")]
+        backend: BackendArg,
     },
     /// Run the project (builds if necessary)
     Run {
         #[arg(long, value_name = "DIR")]
         manifest_path: Option<PathBuf>,
+        #[arg(long, value_enum, default_value = "legacy")]
+        backend: BackendArg,
     },
     /// Check sources for parser/lexer errors
     Check {
@@ -111,13 +130,21 @@ fn main() -> Result<()> {
         Some(Command::Init { dir }) => {
             init::init_project(dir)?;
         }
-        Some(Command::Build { manifest_path }) => {
+        Some(Command::Build {
+            manifest_path,
+            backend,
+        }) => {
             let mut ctx = ProjectContext::load(manifest_path)?;
-            let _ = build::build_project(&mut ctx)?;
+            let backend = build::BackendKind::from(backend);
+            let _ = build::build_project(&mut ctx, backend)?;
         }
-        Some(Command::Run { manifest_path }) => {
+        Some(Command::Run {
+            manifest_path,
+            backend,
+        }) => {
             let mut ctx = ProjectContext::load(manifest_path)?;
-            run::run_project(&mut ctx)?;
+            let backend = build::BackendKind::from(backend);
+            run::run_project(&mut ctx, backend)?;
         }
         Some(Command::Check { manifest_path }) => {
             let ctx = ProjectContext::load(manifest_path)?;

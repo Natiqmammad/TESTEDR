@@ -1,21 +1,29 @@
+use std::process::Command;
+
 use anyhow::{anyhow, Result};
 use nightscript_android::module_loader::ModuleLoader;
 use nightscript_android::runtime::Interpreter;
 
 use crate::{
-    commands::build::{artifact_path, build_project, BuildArtifact},
+    commands::build::{
+        artifact_path, build_project, BuildArtifact, BuildOutput, BackendKind, NativeArtifact,
+    },
     ProjectContext,
 };
 
-pub fn run_project(ctx: &mut ProjectContext) -> Result<()> {
-    let artifact = build_project(ctx)?;
-    if let Ok(path) = artifact_path(ctx, false) {
-        println!("Running {}", path.display());
+pub fn run_project(ctx: &mut ProjectContext, backend: BackendKind) -> Result<()> {
+    match build_project(ctx, backend)? {
+        BuildOutput::Legacy(artifact) => {
+            if let Ok(path) = artifact_path(ctx, false) {
+                println!("Running {}", path.display());
+            }
+            execute_legacy(ctx, &artifact)
+        }
+        BuildOutput::Native(native) => execute_native(&native),
     }
-    execute_artifact(ctx, &artifact)
 }
 
-fn execute_artifact(ctx: &ProjectContext, artifact: &BuildArtifact) -> Result<()> {
+fn execute_legacy(ctx: &ProjectContext, artifact: &BuildArtifact) -> Result<()> {
     let main_key = "src/main.afml";
     let main_src = artifact
         .sources
@@ -28,5 +36,14 @@ fn execute_artifact(ctx: &ProjectContext, artifact: &BuildArtifact) -> Result<()
         .run(&ast)
         .map_err(|err| anyhow!(err.to_string()))?;
     println!("Program completed successfully");
+    Ok(())
+}
+
+fn execute_native(artifact: &NativeArtifact) -> Result<()> {
+    println!("Running {}", artifact.executable.display());
+    let status = Command::new(&artifact.executable).status()?;
+    if !status.success() {
+        return Err(anyhow!("process exited with {}", status));
+    }
     Ok(())
 }

@@ -9,6 +9,8 @@ pub mod flutter;
 pub mod lexer;
 pub mod module_loader;
 pub mod parser;
+pub mod ir;
+pub mod codegen;
 pub mod runtime;
 pub mod lsp;
 pub mod span;
