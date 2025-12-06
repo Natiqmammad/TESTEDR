@@ -1,0 +1,135 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "ApexForge NightScript",
+  "scopeName": "source.afml",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#uiDsl" },
+    { "include": "#asyncApis" },
+    { "include": "#engineApis" },
+    { "include": "#modulePaths" },
+    { "include": "#functions" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.afml",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.afml",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.afml",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.afml",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.afml",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.afml",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.afml",
+          "match": "\\b\\d[\\d_]*\\.[\\d_]+(e[+-]?\\d+)?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.afml",
+          "match": "\\b\\d[\\d_]*\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.afml",
+          "match": "\\b(async|await|fun|return|let|var|struct|enum|trait|impl|import|as|extern|if|else|for|while|switch|try|catch|unsafe|assembly|slice|tuple|mut|widget|state|build|setState|apex|task|channel|stream|yield|async\\s+let)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.afml",
+          "match": "\\b(i8|i16|i32|i64|i128|u8|u16|u32|u64|u128|f32|f64|bool|str|string|char|vec|map|set|option|result|tuple|slice|uuid|email|IpAddr|MacAddr|url|date|datetime|timezone|path|color|Widget|BuildContext|RenderContext|RenderObject|Scene|Layer)\\b"
+        }
+      ]
+    },
+    "uiDsl": {
+      "patterns": [
+        {
+          "name": "support.class.ui.afml",
+          "match": "\\b(Text|Button|Column|Row|Container|Center|AppBar|Scaffold|Image|TextField|Switch|Slider|Card|ListView|ScrollView|Stack|SceneBuilder|ContainerLayer|PictureLayer|TransformLayer|OpacityLayer|ClipLayer|PlatformChannel)\\b"
+        },
+        {
+          "name": "support.function.ui.afml",
+          "match": "\\bctx\\.(text|button|column|row|container|image|list|appbar|scaffold|widget|emit_event)\\b"
+        }
+      ]
+    },
+    "asyncApis": {
+      "patterns": [
+        {
+          "name": "support.function.async.afml",
+          "match": "\\basync\\.(sleep|timeout|spawn|parallel|race|all|any|then|catch|finally|cancel|is_cancelled|channel|stream|yield|interval|retry)\\b"
+        }
+      ]
+    },
+    "engineApis": {
+      "patterns": [
+        {
+          "name": "support.function.engine.afml",
+          "match": "\\b(FlutterEmbedder|FlutterEngine|SceneBuilder|Renderer|RenderLoop|MethodCall|MethodResponse|MethodChannel|WindowMetrics|PointerEvent|PlatformMessage|FlutterEngineRun|FlutterEngineCreateAOTData|FlutterEngineShutdown)\\b"
+        }
+      ]
+    },
+    "modulePaths": {
+      "patterns": [
+        {
+          "name": "support.namespace.afml",
+          "match": "\\b((forge|android|flutter|web|math|log|async|vec|str|map|set)(\\.[A-Za-z_][\\w]*)+)\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "entity.name.function.afml",
+          "match": "\\bfun\\s+([A-Za-z_][\\w]*)",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.afml"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -25,6 +25,7 @@ impl<'a> Lexer<'a> {
 
     fn lex(mut self) -> Result<Vec<Token>, LexError> {
         let mut tokens = Vec::new();
+        self.skip_bom();
         loop {
             self.skip_trivia()?;
             let ch = match self.peek_char() {
@@ -379,6 +380,12 @@ impl<'a> Lexer<'a> {
             self.column += 1;
         }
         Some((idx, ch))
+    }
+
+    fn skip_bom(&mut self) {
+        if self.index == 0 && self.peek_char() == Some('\u{feff}') {
+            self.advance_char();
+        }
     }
 }
 

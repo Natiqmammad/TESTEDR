@@ -60,6 +60,7 @@ pub struct FunctionSignature {
     pub returns_async: bool,
     pub params: Vec<Param>,
     pub return_type: Option<TypeExpr>,
+    pub type_params: Vec<TypeParam>,
     pub span: Span,
 }
 
@@ -74,6 +75,7 @@ pub struct Param {
 pub struct StructDef {
     pub attributes: Vec<Attribute>,
     pub name: String,
+    pub type_params: Vec<TypeParam>,
     pub fields: Vec<StructField>,
     pub span: Span,
 }
@@ -89,6 +91,7 @@ pub struct StructField {
 pub struct EnumDef {
     pub attributes: Vec<Attribute>,
     pub name: String,
+    pub type_params: Vec<TypeParam>,
     pub variants: Vec<EnumVariant>,
     pub span: Span,
 }
@@ -104,6 +107,7 @@ pub struct EnumVariant {
 pub struct TraitDef {
     pub attributes: Vec<Attribute>,
     pub name: String,
+    pub type_params: Vec<TypeParam>,
     pub methods: Vec<FunctionSignature>,
     pub span: Span,
 }
@@ -111,6 +115,7 @@ pub struct TraitDef {
 #[derive(Debug, Clone)]
 pub struct ImplBlock {
     pub attributes: Vec<Attribute>,
+    pub type_params: Vec<TypeParam>,
     pub trait_type: Option<TypeExpr>,
     pub target: TypeExpr,
     pub methods: Vec<Function>,
@@ -460,5 +465,11 @@ pub struct NamedType {
 pub struct TypeSegment {
     pub name: String,
     pub generics: Vec<TypeExpr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeParam {
+    pub name: String,
     pub span: Span,
 }

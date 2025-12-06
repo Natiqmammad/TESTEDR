@@ -12,6 +12,14 @@ crate-type = ["cdylib", "rlib"]
 name = "nightscript"
 path = "src/main.rs"
 
+[[bin]]
+name = "apexrc"
+path = "apexrc/src/main.rs"
+
+[[bin]]
+name = "afns-lsp"
+path = "src/bin/lsp_server.rs"
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
@@ -30,6 +38,9 @@ libc = "0.2"
 libloading = "0.7"
 walkdir = "2.5.0"
 dirs = "6.0.0"
+toml = "0.8"
+blake3 = "1.5"
+tower-lsp = "0.20"
 
 [features]
 default = []

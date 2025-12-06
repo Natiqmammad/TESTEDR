@@ -1,0 +1,20 @@
+{
+  "iconDefinitions": {
+    "afmlIcon": {
+      "iconPath": "./afml_icon.png"
+    }
+  },
+  "fileExtensions": {
+    "afml": "afmlIcon"
+  },
+  "light": {
+    "fileExtensions": {
+      "afml": "afmlIcon"
+    }
+  },
+  "dark": {
+    "fileExtensions": {
+      "afml": "afmlIcon"
+    }
+  }
+}

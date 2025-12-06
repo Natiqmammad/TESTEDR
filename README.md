@@ -1,5 +1,9 @@
 # 🚀 **ApexForge NightScript (AFNS) – Full Language Spec (REBORN EDITION)**
 
+![ApexForge Official Logo](assets/branding/apexforge_logo.png)
+
+> **Branding Note:** The ApexForge logo above (see `assets/branding/logo_config.toml`) is the single canonical asset for the entire ecosystem—do not alter or replace it in docs, tools, or releases.
+
 ### **v1.0.0-alpha — Finalized Structured Draft**
 
 > **Unicode math characters disabled**

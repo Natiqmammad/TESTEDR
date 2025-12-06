@@ -1,0 +1,10 @@
+[logo]
+name = "ApexForge Official Logo"
+path = "assets/branding/apexforge_logo.png"
+hash = "sha256:2f117484cf4db92eb6df9ec3344dfccb1f906a00803fe171489fc8a59b4ef1c4"
+description = "Always use this untouched asset for ApexForge docs, compiler banners, extensions, and marketing material."
+
+[usage]
+compiler = "apexrc CLI banner references this file path before executing commands."
+extension = "apexforge-nightscript-vscode/package.json uses icon.png copied from the official asset."
+docs = "Markdown files should embed the logo via assets/branding/apexforge_logo.png."

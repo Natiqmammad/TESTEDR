@@ -1,0 +1,91 @@
+{
+  "Function": {
+    "prefix": "af-fun",
+    "body": [
+      "fun ${1:name}(${2:params}) -> ${3:Type} {",
+      "    ${0:// body}",
+      "}"
+    ],
+    "description": "Define a synchronous function"
+  },
+  "AsyncFunction": {
+    "prefix": "af-async",
+    "body": [
+      "async fun ${1:name}(${2:params}) -> async ${3:Type} {",
+      "    ${0:// await work}",
+      "}"
+    ],
+    "description": "Define an async function returning a future"
+  },
+  "Struct": {
+    "prefix": "af-struct",
+    "body": [
+      "struct ${1:Name} {",
+      "    ${2:field}:: ${3:Type},",
+      "}"
+    ],
+    "description": "Create a struct declaration"
+  },
+  "ImplBlock": {
+    "prefix": "af-impl",
+    "body": [
+      "impl ${1:Type} {",
+      "    fun ${2:method}(${3:self}) -> ${4:Type} {",
+      "        ${0:// method body}",
+      "    }",
+      "}"
+    ],
+    "description": "Implement methods for a type"
+  },
+  "UiDsl": {
+    "prefix": "af-ui",
+    "body": [
+      "ctx.column([",
+      "    ctx.text(\"${1:Title}\"),",
+      "    ctx.button(\"${2:Action}\", fun() {",
+      "        ${0:// handle tap}",
+      "    })",
+      "]);"
+    ],
+    "description": "UI DSL helpers (ctx.column / ctx.button / ctx.text)"
+  },
+  "AsyncAwaitPattern": {
+    "prefix": "af-await",
+    "body": [
+      "async let ${1:task} = async.spawn(fun() {",
+      "    ${2:// work}",
+      "});",
+      "let ${3:result} = await ${1:task};"
+    ],
+    "description": "Spawn and await an async task"
+  },
+  "AsyncThenCatch": {
+    "prefix": "af-then",
+    "body": [
+      "${1:future}",
+      "    .then(fun(value) {",
+      "        ${2:// success}",
+      "        return value;",
+      "    })",
+      "    .catch(fun(err) {",
+      "        ${3:// error}",
+      "        return err;",
+      "    })",
+      "    .finally(fun() {",
+      "        ${0:// cleanup}",
+      "    });"
+    ],
+    "description": "Chain async.then / catch / finally"
+  },
+  "SceneBuilder": {
+    "prefix": "af-scene",
+    "body": [
+      "let mut builder = SceneBuilder::new();",
+      "builder.push_transform(${1:matrix});",
+      "builder.add_picture(${2:picture});",
+      "builder.pop();",
+      "let scene = builder.build();"
+    ],
+    "description": "SceneBuilder integration snippet"
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "name": "apexforge-nightscript",
+  "displayName": "ApexForge NightScript",
+  "description": "Complete ApexForge NightScript (AFNS) experience: syntax highlighting, snippets, completions, and tooling hooks for apexrc projects.",
+  "version": "0.1.0",
+  "publisher": "afns",
+  "icon": "icon.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:afml"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "afml",
+        "aliases": [
+          "ApexForge NightScript",
+          "AFNS"
+        ],
+        "extensions": [
+          ".afml"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "afml",
+        "scopeName": "source.afml",
+        "path": "./syntaxes/nightScript.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "afml",
+        "path": "./snippets/nightScript.json"
+      }
+    ],
+    "iconThemes": [
+      {
+        "id": "apexforge-icons",
+        "label": "ApexForge Icons",
+        "path": "./fileicons/icon-theme.json"
+      }
+    ],
+    "configurationDefaults": {
+      "[afml]": {
+        "editor.defaultFormatter": "afns.afml-formatter",
+        "editor.autoClosingBrackets": "always",
+        "editor.autoIndent": "advanced"
+      }
+    }
+  },
+  "keywords": [
+    "apexforge",
+    "nightscript",
+    "afml",
+    "async",
+    "flutter",
+    "scene",
+    "apexrc"
+  ],
+  "devDependencies": {
+    "@vscode/vsce": "^3.7.1"
+  }
+}

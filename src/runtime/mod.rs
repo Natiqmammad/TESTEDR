@@ -1,12 +1,17 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
+use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 
-use crate::ast::{Block, Expr, File, Item, Literal, Param, Pattern, Stmt, SwitchStmt, TryCatch};
+use crate::ast::{
+    Block, Expr, File, Import, Item, Literal, NamedType, Param, Pattern, Stmt, SwitchStmt,
+    TryCatch, TypeExpr,
+};
+use crate::module_loader::ModuleLoader;
 
 #[cfg(target_os = "android")]
 pub mod android;
@@ -105,6 +110,295 @@ impl Env {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrimitiveType {
+    Bool,
+    Int,
+    UInt,
+    Float,
+    String,
+    Char,
+}
+
+impl fmt::Display for PrimitiveType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PrimitiveType::Bool => write!(f, "bool"),
+            PrimitiveType::Int => write!(f, "int"),
+            PrimitiveType::UInt => write!(f, "uint"),
+            PrimitiveType::Float => write!(f, "float"),
+            PrimitiveType::String => write!(f, "str"),
+            PrimitiveType::Char => write!(f, "char"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TypeTag {
+    Primitive(PrimitiveType),
+    Vec(Box<TypeTag>),
+    Set(Box<TypeTag>),
+    Map(Box<TypeTag>, Box<TypeTag>),
+    Option(Box<TypeTag>),
+    Result(Box<TypeTag>, Box<TypeTag>),
+    Tuple(Vec<TypeTag>),
+    Custom(String),
+    Unknown,
+}
+
+impl TypeTag {
+    fn describe(&self) -> String {
+        match self {
+            TypeTag::Primitive(p) => p.to_string(),
+            TypeTag::Vec(inner) => format!("vec<{}>", inner.describe()),
+            TypeTag::Set(inner) => format!("set<{}>", inner.describe()),
+            TypeTag::Map(key, value) => format!("map<{}, {}>", key.describe(), value.describe()),
+            TypeTag::Option(inner) => format!("option<{}>", inner.describe()),
+            TypeTag::Result(ok, err) => format!("result<{}, {}>", ok.describe(), err.describe()),
+            TypeTag::Tuple(items) => {
+                let inner = items.iter().map(|t| t.describe()).collect::<Vec<_>>().join(", ");
+                format!("tuple({inner})")
+            }
+            TypeTag::Custom(name) => name.clone(),
+            TypeTag::Unknown => "unknown".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct VecValue {
+    pub elem_type: Option<TypeTag>,
+    pub items: Vec<Value>,
+}
+
+impl VecValue {
+    fn new(elem_type: Option<TypeTag>) -> Self {
+        Self {
+            elem_type,
+            items: Vec::new(),
+        }
+    }
+}
+
+impl Deref for VecValue {
+    type Target = Vec<Value>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.items
+    }
+}
+
+impl DerefMut for VecValue {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.items
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SetValue {
+    pub elem_type: Option<TypeTag>,
+    pub items: Vec<Value>,
+}
+
+impl SetValue {
+    fn new(elem_type: Option<TypeTag>) -> Self {
+        Self {
+            elem_type,
+            items: Vec::new(),
+        }
+    }
+}
+
+impl Deref for SetValue {
+    type Target = Vec<Value>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.items
+    }
+}
+
+impl DerefMut for SetValue {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.items
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct MapValue {
+    pub key_type: Option<TypeTag>,
+    pub value_type: Option<TypeTag>,
+    pub entries: HashMap<String, Value>,
+}
+
+impl MapValue {
+    fn new(
+        key_type: Option<TypeTag>,
+        value_type: Option<TypeTag>,
+    ) -> Self {
+        Self {
+            key_type,
+            value_type,
+            entries: HashMap::new(),
+        }
+    }
+}
+
+fn primitive_from_name(name: &str) -> Option<PrimitiveType> {
+    match name {
+        "bool" => Some(PrimitiveType::Bool),
+        "str" | "string" => Some(PrimitiveType::String),
+        "char" => Some(PrimitiveType::Char),
+        "f32" | "f64" => Some(PrimitiveType::Float),
+        "i8" | "i16" | "i32" | "i64" | "i128" => Some(PrimitiveType::Int),
+        "u8" | "u16" | "u32" | "u64" | "u128" => Some(PrimitiveType::UInt),
+        _ => None,
+    }
+}
+
+fn type_tag_from_type_expr(expr: &TypeExpr) -> TypeTag {
+    match expr {
+        TypeExpr::Named(named) => type_tag_from_named(named),
+        TypeExpr::Slice { element, .. } | TypeExpr::Reference { inner: element, .. } => {
+            TypeTag::Vec(Box::new(type_tag_from_type_expr(element)))
+        }
+        TypeExpr::Array { element, .. } => TypeTag::Vec(Box::new(type_tag_from_type_expr(element))),
+        TypeExpr::Tuple { elements, .. } => TypeTag::Tuple(
+            elements
+                .iter()
+                .map(|e| type_tag_from_type_expr(e))
+                .collect::<Vec<_>>(),
+        ),
+    }
+}
+
+fn type_tag_from_named(named: &NamedType) -> TypeTag {
+    let name = named
+        .segments
+        .last()
+        .map(|s| s.name.as_str())
+        .unwrap_or_default();
+    let path = named
+        .segments
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect::<Vec<_>>()
+        .join("::");
+    match name {
+        "vec" => {
+            if let Some(last) = named.segments.last() {
+                if let Some(arg) = last.generics.get(0) {
+                    return TypeTag::Vec(Box::new(type_tag_from_type_expr(arg)));
+                }
+            }
+            TypeTag::Vec(Box::new(TypeTag::Unknown))
+        }
+        "set" => {
+            if let Some(last) = named.segments.last() {
+                if let Some(arg) = last.generics.get(0) {
+                    return TypeTag::Set(Box::new(type_tag_from_type_expr(arg)));
+                }
+            }
+            TypeTag::Set(Box::new(TypeTag::Unknown))
+        }
+        "map" => {
+            if let Some(last) = named.segments.last() {
+                let key = last
+                    .generics
+                    .get(0)
+                    .map(|g| type_tag_from_type_expr(g))
+                    .unwrap_or(TypeTag::Unknown);
+                let value = last
+                    .generics
+                    .get(1)
+                    .map(|g| type_tag_from_type_expr(g))
+                    .unwrap_or(TypeTag::Unknown);
+                return TypeTag::Map(Box::new(key), Box::new(value));
+            }
+            TypeTag::Map(Box::new(TypeTag::Unknown), Box::new(TypeTag::Unknown))
+        }
+        "option" => {
+            if let Some(last) = named.segments.last() {
+                if let Some(arg) = last.generics.get(0) {
+                    return TypeTag::Option(Box::new(type_tag_from_type_expr(arg)));
+                }
+            }
+            TypeTag::Option(Box::new(TypeTag::Unknown))
+        }
+        "result" => {
+            if let Some(last) = named.segments.last() {
+                let ok = last
+                    .generics
+                    .get(0)
+                    .map(|g| type_tag_from_type_expr(g))
+                    .unwrap_or(TypeTag::Unknown);
+                let err = last
+                    .generics
+                    .get(1)
+                    .map(|g| type_tag_from_type_expr(g))
+                    .unwrap_or(TypeTag::Unknown);
+                return TypeTag::Result(Box::new(ok), Box::new(err));
+            }
+            TypeTag::Result(Box::new(TypeTag::Unknown), Box::new(TypeTag::Unknown))
+        }
+        _ => {
+            if let Some(prim) = primitive_from_name(name) {
+                TypeTag::Primitive(prim)
+            } else {
+                TypeTag::Custom(path)
+            }
+        }
+    }
+}
+
+fn type_tag_matches_value(tag: &TypeTag, value: &Value) -> bool {
+    match tag {
+        TypeTag::Primitive(PrimitiveType::Bool) => matches!(value, Value::Bool(_)),
+        TypeTag::Primitive(PrimitiveType::Int) | TypeTag::Primitive(PrimitiveType::UInt) => {
+            matches!(value, Value::Int(_))
+        }
+        TypeTag::Primitive(PrimitiveType::Float) => matches!(value, Value::Float(_)),
+        TypeTag::Primitive(PrimitiveType::String) => matches!(value, Value::String(_)),
+        TypeTag::Primitive(PrimitiveType::Char) => matches!(value, Value::String(_)),
+        TypeTag::Vec(_) => matches!(value, Value::Vec(_)),
+        TypeTag::Set(_) => matches!(value, Value::Set(_)),
+        TypeTag::Map(_, _) => matches!(value, Value::Map(_)),
+        TypeTag::Option(_) => matches!(value, Value::Option(_)),
+        TypeTag::Result(_, _) => matches!(value, Value::Result(_)),
+        TypeTag::Tuple(_) => matches!(value, Value::Tuple(_)),
+        TypeTag::Custom(_) | TypeTag::Unknown => true,
+    }
+}
+
+fn ensure_tag_match(
+    tag: &Option<TypeTag>,
+    value: &Value,
+    context: &str,
+) -> RuntimeResult<()> {
+    if let Some(expected) = tag {
+        if !type_tag_matches_value(expected, value) {
+            return Err(RuntimeError::new(format!(
+                "{context}: expected value of type {}, got {}",
+                expected.describe(),
+                value.type_name()
+            )));
+        }
+    }
+    Ok(())
+}
+impl Deref for MapValue {
+    type Target = HashMap<String, Value>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+impl DerefMut for MapValue {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.entries
+    }
+}
+
 #[derive(Clone)]
 pub enum Value {
     Null,
@@ -112,9 +406,9 @@ pub enum Value {
     Int(i64),
     Float(f64),
     String(String),
-    Vec(Rc<RefCell<Vec<Value>>>),
-    Map(Rc<RefCell<HashMap<String, Value>>>),
-    Set(Rc<RefCell<Vec<Value>>>),
+    Vec(Rc<RefCell<VecValue>>),
+    Map(Rc<RefCell<MapValue>>),
+    Set(Rc<RefCell<SetValue>>),
     Result(ResultValue),
     Option(OptionValue),
     Future(FutureHandle),
@@ -129,14 +423,27 @@ pub enum Value {
 
 #[derive(Clone, Debug)]
 pub enum ResultValue {
-    Ok(Box<Value>),
-    Err(Box<Value>),
+    Ok {
+        value: Box<Value>,
+        ok_type: Option<TypeTag>,
+        err_type: Option<TypeTag>,
+    },
+    Err {
+        value: Box<Value>,
+        ok_type: Option<TypeTag>,
+        err_type: Option<TypeTag>,
+    },
 }
 
 #[derive(Clone, Debug)]
 pub enum OptionValue {
-    Some(Box<Value>),
-    None,
+    Some {
+        value: Box<Value>,
+        elem_type: Option<TypeTag>,
+    },
+    None {
+        elem_type: Option<TypeTag>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -469,7 +776,7 @@ impl FutureValue {
                     PollResult::Pending
                 } else {
                     eprintln!("[async] parallel/all ready count={}", results.len());
-                    PollResult::Ready(Value::Vec(Rc::new(RefCell::new(results))))
+                    PollResult::Ready(make_vec_value(results, None))
                 }
             }
             FutureKind::Race { tasks } => {
@@ -593,6 +900,29 @@ impl fmt::Debug for Value {
 }
 
 impl Value {
+    fn type_name(&self) -> &'static str {
+        match self {
+            Value::Null => "null",
+            Value::Bool(_) => "bool",
+            Value::Int(_) => "int",
+            Value::Float(_) => "float",
+            Value::String(_) => "str",
+            Value::Vec(_) => "vec",
+            Value::Map(_) => "map",
+            Value::Set(_) => "set",
+            Value::Result(_) => "result",
+            Value::Option(_) => "option",
+            Value::Future(_) => "future",
+            Value::Struct(_) => "struct",
+            Value::Enum(_) => "enum",
+            Value::Tuple(_) => "tuple",
+            Value::Closure(_) => "closure",
+            Value::Function(_) => "function",
+            Value::Builtin(_) => "builtin",
+            Value::Module(_) => "module",
+        }
+    }
+
     fn is_truthy(&self) -> bool {
         match self {
             Value::Null => false,
@@ -603,8 +933,8 @@ impl Value {
             Value::Vec(vec) => !vec.borrow().is_empty(),
             Value::Map(map) => !map.borrow().is_empty(),
             Value::Set(set) => !set.borrow().is_empty(),
-            Value::Result(res) => matches!(res, ResultValue::Ok(_)),
-            Value::Option(opt) => matches!(opt, OptionValue::Some(_)),
+            Value::Result(res) => matches!(res, ResultValue::Ok { .. }),
+            Value::Option(opt) => matches!(opt, OptionValue::Some { .. }),
             Value::Future(_) | Value::Function(_) | Value::Builtin(_) | Value::Module(_) => true,
             Value::Struct(_) => true,
             Value::Enum(_) => true,
@@ -629,6 +959,15 @@ impl Value {
                     .join(", ");
                 format!("[{items}]")
             }
+            Value::Set(set) => {
+                let items = set
+                    .borrow()
+                    .iter()
+                    .map(|v| v.to_string_value())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{{items}}}")
+            }
             Value::Map(map) => {
                 let items = map
                     .borrow()
@@ -647,10 +986,10 @@ impl Value {
                     .join(", ");
                 format!("set{{{items}}}")
             }
-            Value::Result(ResultValue::Ok(val)) => format!("Ok({})", val.to_string_value()),
-            Value::Result(ResultValue::Err(val)) => format!("Err({})", val.to_string_value()),
-            Value::Option(OptionValue::Some(val)) => format!("Some({})", val.to_string_value()),
-            Value::Option(OptionValue::None) => "None".to_string(),
+            Value::Result(ResultValue::Ok { value, .. }) => format!("Ok({})", value.to_string_value()),
+            Value::Result(ResultValue::Err { value, .. }) => format!("Err({})", value.to_string_value()),
+            Value::Option(OptionValue::Some { value, .. }) => format!("Some({})", value.to_string_value()),
+            Value::Option(OptionValue::None { .. }) => "None".to_string(),
             Value::Future(_) => "<future>".to_string(),
             Value::Struct(instance) => {
                 let fields = instance
@@ -702,12 +1041,16 @@ pub struct UserFunction {
     pub params: Vec<Param>,
     pub body: Block,
     pub is_async: bool,
+    pub env: Env,
+    pub type_params: Vec<String>,
 }
 
 type BuiltinFn = fn(&mut Interpreter, &[Value]) -> RuntimeResult<Value>;
 
 pub struct Interpreter {
     globals: Env,
+    module_loader: ModuleLoader,
+    modules: HashMap<String, ModuleValue>,
 }
 
 enum ExecSignal {
@@ -717,14 +1060,24 @@ enum ExecSignal {
 
 impl Interpreter {
     pub fn new() -> Self {
+        Self::with_module_loader(ModuleLoader::new())
+    }
+
+    pub fn with_module_loader(module_loader: ModuleLoader) -> Self {
         let env = Env::new();
         register_builtins(&env);
         eprintln!("[interp] created");
-        Self { globals: env }
+        Self {
+            globals: env,
+            module_loader,
+            modules: HashMap::new(),
+        }
     }
 
     pub fn register_file(&mut self, ast: &File) -> RuntimeResult<()> {
-        self.load_functions(ast)
+        self.bind_imports(&ast.imports, &self.globals)?;
+        let _ = self.load_functions_into_env(&self.globals, ast)?;
+        Ok(())
     }
 
     pub fn call_function_by_name(&mut self, name: &str, args: Vec<Value>) -> RuntimeResult<Value> {
@@ -733,7 +1086,7 @@ impl Interpreter {
     }
 
     pub fn run(&mut self, ast: &File) -> RuntimeResult<()> {
-        self.load_functions(ast)?;
+        self.register_file(ast)?;
         let apex_val = self.globals.get("apex")?;
         eprintln!("[interp] invoking apex");
         match apex_val {
@@ -755,7 +1108,12 @@ impl Interpreter {
         }
     }
 
-    fn load_functions(&mut self, ast: &File) -> RuntimeResult<()> {
+    fn load_functions_into_env(
+        &mut self,
+        env: &Env,
+        ast: &File,
+    ) -> RuntimeResult<HashMap<String, Value>> {
+        let mut defined = HashMap::new();
         for item in &ast.items {
             if let Item::Function(func) = item {
                 let value = Value::Function(UserFunction {
@@ -763,11 +1121,52 @@ impl Interpreter {
                     params: func.signature.params.clone(),
                     body: func.body.clone(),
                     is_async: func.signature.is_async,
+                    env: env.clone(),
+                    type_params: func
+                        .signature
+                        .type_params
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect(),
                 });
-                self.globals.define(func.signature.name.clone(), value);
+                env.define(func.signature.name.clone(), value.clone());
+                defined.insert(func.signature.name.clone(), value);
             }
         }
+        Ok(defined)
+    }
+
+    fn bind_imports(&mut self, imports: &[Import], env: &Env) -> RuntimeResult<()> {
+        for import in imports {
+            let module_name = import.path.join(".");
+            let module = self.load_module_value(&module_name)?;
+            let binding = import
+                .alias
+                .clone()
+                .or_else(|| import.path.last().cloned())
+                .ok_or_else(|| RuntimeError::new("invalid import path"))?;
+            env.define(binding, Value::Module(module));
+        }
         Ok(())
+    }
+
+    fn load_module_value(&mut self, name: &str) -> RuntimeResult<ModuleValue> {
+        if let Some(module) = self.modules.get(name) {
+            return Ok(module.clone());
+        }
+        let loaded = self
+            .module_loader
+            .load_module(name)
+            .map_err(|err| RuntimeError::new(format!("failed to load module `{name}`: {err}")))?;
+        let module_env = self.globals.child();
+        self.bind_imports(&loaded.ast.imports, &module_env)?;
+        let fields = self.load_functions_into_env(&module_env, &loaded.ast)?;
+        let module_value = ModuleValue {
+            name: loaded.name.clone(),
+            fields,
+        };
+        self.modules.insert(name.to_string(), module_value.clone());
+        Ok(module_value)
     }
 
     fn execute_block(&mut self, block: &Block, env: Env) -> RuntimeResult<ExecSignal> {
@@ -785,7 +1184,11 @@ impl Interpreter {
     fn execute_stmt(&mut self, stmt: &Stmt, env: &Env) -> RuntimeResult<ExecSignal> {
         match stmt {
             Stmt::VarDecl(var) => {
-                let value = self.eval_expr(&var.value, env)?;
+                let mut value = self.eval_expr(&var.value, env)?;
+                if let Some(ty) = &var.ty {
+                    let tag = type_tag_from_type_expr(ty);
+                    apply_type_tag_to_value(&mut value, &tag);
+                }
                 env.define(var.name.clone(), value);
                 Ok(ExecSignal::None)
             }
@@ -988,7 +1391,7 @@ impl Interpreter {
                 for elem in elements {
                     arr.push(self.eval_expr(elem, env)?);
                 }
-                Ok(Value::Vec(Rc::new(RefCell::new(arr))))
+                Ok(make_vec_value(arr, None))
             }
             Expr::Block(block) => {
                 let result = self.execute_block(block, env.clone())?;
@@ -1000,12 +1403,16 @@ impl Interpreter {
             Expr::Try { expr, .. } => {
                 let value = self.eval_expr(expr, env)?;
                 match value {
-                    Value::Result(ResultValue::Ok(inner)) => Ok(*inner),
-                    Value::Result(ResultValue::Err(err)) => Err(RuntimeError::propagate(*err)),
-                    Value::Option(OptionValue::Some(inner)) => Ok(*inner),
-                    Value::Option(OptionValue::None) => {
-                        Err(RuntimeError::propagate(Value::Option(OptionValue::None)))
+                    Value::Result(ResultValue::Ok { value, .. }) => Ok(*value),
+                    Value::Result(ResultValue::Err { value, .. }) => {
+                        Err(RuntimeError::propagate(*value))
                     }
+                    Value::Option(OptionValue::Some { value, .. }) => Ok(*value),
+                    Value::Option(OptionValue::None { elem_type }) => Err(
+                        RuntimeError::propagate(Value::Option(OptionValue::None {
+                            elem_type: elem_type.clone(),
+                        })),
+                    ),
                     _ => Err(RuntimeError::new("`?` expects result<T,E> or option<T>")),
                 }
             }
@@ -1073,8 +1480,12 @@ impl Interpreter {
                     for arg in args {
                         evaluated_args.push(self.eval_expr(arg, env)?);
                     }
-                    if let Some(Value::Builtin(func)) = m.fields.get(method) {
-                        return func(self, &evaluated_args);
+                    if let Some(member) = m.fields.get(method) {
+                        let member_value = member.clone();
+                        return match member_value {
+                            Value::Builtin(func) => func(self, &evaluated_args),
+                            other => self.invoke(other, evaluated_args),
+                        };
                     } else {
                         return Err(RuntimeError::new(format!(
                             "Unknown method `{method}` on module {}",
@@ -1351,7 +1762,7 @@ impl Interpreter {
                 args.len()
             )));
         }
-        let frame = self.globals.child();
+        let frame = func.env.child();
         for (param, value) in func.params.iter().zip(args.into_iter()) {
             frame.define(param.name.clone(), value);
         }
@@ -1693,14 +2104,18 @@ fn builtin_math_pi(_interp: &mut Interpreter, _args: &[Value]) -> RuntimeResult<
 
 fn builtin_vec_new(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 0, "vec.new")?;
-    Ok(Value::Vec(Rc::new(RefCell::new(Vec::new()))))
+    Ok(make_vec_value(Vec::new(), None))
 }
 
 fn builtin_vec_push(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 2, "vec.push")?;
     let vec_rc = expect_vec(&args[0])?;
     let value = args[1].clone();
-    vec_rc.borrow_mut().push(value);
+    {
+        let mut vec_mut = vec_rc.borrow_mut();
+        ensure_tag_match(&vec_mut.elem_type, &value, "vec.push")?;
+        vec_mut.push(value);
+    }
     Ok(Value::Null)
 }
 
@@ -1991,8 +2406,24 @@ fn builtin_vec_extend(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResul
     ensure_arity(args, 2, "vec.extend")?;
     let vec_rc = expect_vec(&args[0])?;
     let other_rc = expect_vec(&args[1])?;
-    let other = other_rc.borrow().clone();
-    vec_rc.borrow_mut().extend(other);
+    let other_items = clone_vec_items(&other_rc);
+    let other_type = other_rc.borrow().elem_type.clone();
+    let mut vec_mut = vec_rc.borrow_mut();
+    if vec_mut.elem_type.is_none() {
+        vec_mut.elem_type = other_type.clone();
+    } else if let (Some(expected), Some(actual)) = (&vec_mut.elem_type, &other_type) {
+        if expected != actual
+            && !matches!(expected, TypeTag::Unknown)
+            && !matches!(actual, TypeTag::Unknown)
+        {
+            return Err(RuntimeError::new(format!(
+                "vec.extend: incompatible element types ({} vs {})",
+                expected.describe(),
+                actual.describe()
+            )));
+        }
+    }
+    vec_mut.extend(other_items);
     Ok(Value::Null)
 }
 
@@ -2007,7 +2438,100 @@ fn ensure_arity(args: &[Value], expected: usize, name: &str) -> RuntimeResult<()
     }
 }
 
-fn expect_vec(value: &Value) -> RuntimeResult<Rc<RefCell<Vec<Value>>>> {
+fn make_vec_value(items: Vec<Value>, elem_type: Option<TypeTag>) -> Value {
+    Value::Vec(Rc::new(RefCell::new(VecValue { elem_type, items })))
+}
+
+fn make_set_value(items: Vec<Value>, elem_type: Option<TypeTag>) -> Value {
+    Value::Set(Rc::new(RefCell::new(SetValue { elem_type, items })))
+}
+
+fn option_some_value(value: Value, elem_type: Option<TypeTag>) -> Value {
+    Value::Option(OptionValue::Some {
+        value: Box::new(value),
+        elem_type,
+    })
+}
+
+fn option_none_value(elem_type: Option<TypeTag>) -> Value {
+    Value::Option(OptionValue::None { elem_type })
+}
+
+fn result_ok_value(
+    value: Value,
+    ok_type: Option<TypeTag>,
+    err_type: Option<TypeTag>,
+) -> Value {
+    Value::Result(ResultValue::Ok {
+        value: Box::new(value),
+        ok_type,
+        err_type,
+    })
+}
+
+fn result_err_value(
+    value: Value,
+    ok_type: Option<TypeTag>,
+    err_type: Option<TypeTag>,
+) -> Value {
+    Value::Result(ResultValue::Err {
+        value: Box::new(value),
+        ok_type,
+        err_type,
+    })
+}
+
+fn clone_vec_items(vec: &Rc<RefCell<VecValue>>) -> Vec<Value> {
+    vec.borrow().iter().cloned().collect()
+}
+
+fn apply_type_tag_to_value(value: &mut Value, tag: &TypeTag) {
+    match (value, tag) {
+        (Value::Vec(vec_rc), TypeTag::Vec(inner)) => {
+            vec_rc.borrow_mut().elem_type = Some((**inner).clone());
+        }
+        (Value::Set(set_rc), TypeTag::Set(inner)) => {
+            set_rc.borrow_mut().elem_type = Some((**inner).clone());
+        }
+        (Value::Map(map_rc), TypeTag::Map(key_tag, value_tag)) => {
+            let mut map_mut = map_rc.borrow_mut();
+            map_mut.key_type = Some((**key_tag).clone());
+            map_mut.value_type = Some((**value_tag).clone());
+        }
+        (Value::Option(opt), TypeTag::Option(inner)) => match opt {
+            OptionValue::Some { value, elem_type } => {
+                *elem_type = Some((**inner).clone());
+                apply_type_tag_to_value(value, inner);
+            }
+            OptionValue::None { elem_type } => {
+                *elem_type = Some((**inner).clone());
+            }
+        },
+        (Value::Result(res), TypeTag::Result(ok_tag, err_tag)) => match res {
+            ResultValue::Ok {
+                value,
+                ok_type,
+                err_type,
+            } => {
+                *ok_type = Some((**ok_tag).clone());
+                *err_type = Some((**err_tag).clone());
+                apply_type_tag_to_value(value, ok_tag);
+            }
+            ResultValue::Err {
+                value,
+                ok_type,
+                err_type,
+            } => {
+                *ok_type = Some((**ok_tag).clone());
+                *err_type = Some((**err_tag).clone());
+                apply_type_tag_to_value(value, err_tag);
+            }
+        },
+        _ => {}
+    }
+}
+
+fn expect_vec(value: &Value) -> RuntimeResult<Rc<RefCell<VecValue>>> {
     if let Value::Vec(rc) = value {
         Ok(rc.clone())
     } else {
@@ -2040,7 +2564,7 @@ fn expect_future(value: &Value) -> RuntimeResult<Box<FutureValue>> {
     }
 }
 
-fn expect_map(value: &Value) -> RuntimeResult<Rc<RefCell<HashMap<String, Value>>>> {
+fn expect_map(value: &Value) -> RuntimeResult<Rc<RefCell<MapValue>>> {
     if let Value::Map(rc) = value {
         Ok(rc.clone())
     } else {
@@ -2120,7 +2644,7 @@ fn builtin_map_len(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<V
     Ok(Value::Int(len))
 }
 
-fn expect_set(value: &Value) -> RuntimeResult<Rc<RefCell<Vec<Value>>>> {
+fn expect_set(value: &Value) -> RuntimeResult<Rc<RefCell<SetValue>>> {
     if let Value::Set(rc) = value {
         Ok(rc.clone())
     } else {

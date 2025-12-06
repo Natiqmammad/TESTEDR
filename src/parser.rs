@@ -102,7 +102,7 @@ impl<'a> Parser<'a> {
             path.push(segment);
         }
         let alias = if self.match_keyword(Keyword::As) {
-            let (alias, alias_span) = self.expect_name("import alias")?;
+            let (alias, alias_span) = self.expect_plain_identifier("import alias")?;
             span = span.merge(alias_span);
             Some(alias)
         } else {
@@ -206,6 +206,7 @@ impl<'a> Parser<'a> {
     fn parse_struct(&mut self, attributes: Vec<Attribute>) -> Result<StructDef, ParseError> {
         let start = self.expect_keyword(Keyword::Struct)?.span;
         let (name, _) = self.expect_identifier("struct name")?;
+        let type_params = self.parse_type_params()?;
         self.expect_with("'{'", |k| matches!(k, TokenKind::LeftBrace))?;
         let mut fields = Vec::new();
         while !self.check(|k| matches!(k, TokenKind::RightBrace)) {
@@ -228,6 +229,7 @@ impl<'a> Parser<'a> {
         Ok(StructDef {
             attributes,
             name,
+            type_params,
             fields,
             span: start.merge(end),
         })
@@ -236,6 +238,7 @@ impl<'a> Parser<'a> {
     fn parse_enum(&mut self, attributes: Vec<Attribute>) -> Result<EnumDef, ParseError> {
         let start = self.expect_keyword(Keyword::Enum)?.span;
         let (name, _) = self.expect_identifier("enum name")?;
+        let type_params = self.parse_type_params()?;
         self.expect_with("'{'", |k| matches!(k, TokenKind::LeftBrace))?;
         let mut variants = Vec::new();
         while !self.check(|k| matches!(k, TokenKind::RightBrace)) {
@@ -272,6 +275,7 @@ impl<'a> Parser<'a> {
         Ok(EnumDef {
             attributes,
             name,
+            type_params,
             variants,
             span: start.merge(end),
         })
@@ -280,6 +284,7 @@ impl<'a> Parser<'a> {
     fn parse_trait(&mut self, attributes: Vec<Attribute>) -> Result<TraitDef, ParseError> {
         let start = self.expect_keyword(Keyword::Trait)?.span;
         let (name, _) = self.expect_identifier("trait name")?;
+        let type_params = self.parse_type_params()?;
         self.expect_with("'{'", |k| matches!(k, TokenKind::LeftBrace))?;
         let mut methods = Vec::new();
         while !self.check(|k| matches!(k, TokenKind::RightBrace)) {
@@ -293,6 +298,7 @@ impl<'a> Parser<'a> {
         Ok(TraitDef {
             attributes,
             name,
+            type_params,
             methods,
             span: start.merge(end),
         })
@@ -300,6 +306,7 @@ impl<'a> Parser<'a> {
 
     fn parse_impl(&mut self, attributes: Vec<Attribute>) -> Result<ImplBlock, ParseError> {
         let start = self.expect_keyword(Keyword::Impl)?.span;
+        let type_params = self.parse_type_params()?;
         let target_or_trait = self.parse_type()?;
         let (trait_type, target) = if self.match_keyword(Keyword::For) {
             let target = self.parse_type()?;
@@ -318,6 +325,7 @@ impl<'a> Parser<'a> {
             .span;
         Ok(ImplBlock {
             attributes,
+            type_params,
             trait_type,
             target,
             methods,
@@ -368,6 +376,7 @@ impl<'a> Parser<'a> {
             start_span = fun_token.span;
         }
         let (name, _) = self.expect_identifier("function name")?;
+        let type_params = self.parse_type_params()?;
         self.expect_with("'('", |k| matches!(k, TokenKind::LeftParen))?;
         let mut params = Vec::new();
         if !self.check(|k| matches!(k, TokenKind::RightParen)) {
@@ -406,6 +415,7 @@ impl<'a> Parser<'a> {
             returns_async,
             params,
             return_type,
+            type_params,
             span,
         })
     }
@@ -1311,6 +1321,23 @@ impl<'a> Parser<'a> {
         Ok(args)
     }
 
+    fn parse_type_params(&mut self) -> Result<Vec<TypeParam>, ParseError> {
+        if !self.match_with(|k| matches!(k, TokenKind::Less)) {
+            return Ok(Vec::new());
+        }
+        let mut params = Vec::new();
+        loop {
+            let (name, span) = self.expect_identifier("type parameter")?;
+            params.push(TypeParam { name, span });
+            if self.match_with(|k| matches!(k, TokenKind::Comma)) {
+                continue;
+            }
+            break;
+        }
+        self.expect_with("'>'", |k| matches!(k, TokenKind::Greater))?;
+        Ok(params)
+    }
+
     fn check_keyword(&self, keyword: Keyword) -> bool {
         matches!(self.peek().kind, TokenKind::Keyword(k) if k == keyword)
     }
@@ -1385,6 +1412,18 @@ impl<'a> Parser<'a> {
                 found: token.kind,
                 span: token.span,
             }),
+        }
+    }
+
+    fn expect_plain_identifier(
+        &mut self,
+        context: &'static str,
+    ) -> Result<(String, Span), ParseError> {
+        let token = self.expect_with(context, |k| matches!(k, TokenKind::Identifier(_)))?;
+        if let TokenKind::Identifier(name) = token.kind {
+            Ok((name, token.span))
+        } else {
+            unreachable!()
         }
     }
 
