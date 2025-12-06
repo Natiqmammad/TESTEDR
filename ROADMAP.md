@@ -2,6 +2,9 @@
 
 **Goal:** Implement the full ApexForge NightScript specification from README, moving from parser prototype → complete interpreter/runtime → platform support → production-ready compiler.
 
+**Scaffold Status:** `apexrc new` is now the canonical way to create projects; `examples/` hosts fully scaffolded `minimal_hello`, `generics_basic`, `generics_collections`, and `custom_generic_type` workspaces that mirror production layouts.
+**Tooling Status:** `apexrc build` emits `.nexec` artifacts with clear paths, and `apexrc run` now performs a build-then-run flow that matches the documented UX.
+
 **Performance Targets:**
 - **Compilation Speed:** 2x faster than Rust
 - **Runtime Performance:** 95% of Assembly performance

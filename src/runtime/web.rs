@@ -1,8 +1,10 @@
 // Phase 4: Web Server Support
 // This module provides HTTP server stubs for web platform
 
-use crate::runtime::{Interpreter, RuntimeError, RuntimeResult, Value};
+use crate::runtime::{Interpreter, MapValue, RuntimeError, RuntimeResult, Value};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// HTTP Request representation
 #[derive(Clone, Debug)]
@@ -188,9 +190,11 @@ pub fn builtin_web_request_headers(
     }
 
     println!("[WEB] Getting request headers");
-    Ok(Value::Map(std::rc::Rc::new(std::cell::RefCell::new(
-        HashMap::new(),
-    ))))
+    Ok(Value::Map(Rc::new(RefCell::new(MapValue {
+        key_type: None,
+        value_type: None,
+        entries: HashMap::new(),
+    }))))
 }
 
 pub fn builtin_web_request_body(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {

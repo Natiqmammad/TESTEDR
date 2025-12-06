@@ -100,7 +100,13 @@ fn main() -> Result<()> {
     }
     match cli.command {
         Some(Command::New { name, dir }) => {
-            new::create_project(&name, dir)?;
+            let target_dir = dir.unwrap_or_else(|| PathBuf::from(&name));
+            let explicit_name = if name.contains(std::path::MAIN_SEPARATOR) {
+                None
+            } else {
+                Some(name.as_str())
+            };
+            new::create_project(target_dir.as_path(), explicit_name)?;
         }
         Some(Command::Init { dir }) => {
             init::init_project(dir)?;

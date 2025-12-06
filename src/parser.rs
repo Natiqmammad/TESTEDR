@@ -211,7 +211,7 @@ impl<'a> Parser<'a> {
         let mut fields = Vec::new();
         while !self.check(|k| matches!(k, TokenKind::RightBrace)) {
             let (field_name, field_span) = self.expect_identifier("struct field name")?;
-            self.expect_with("'::'", |k| matches!(k, TokenKind::ColonColon))?;
+            self.expect_type_separator()?;
             let ty = self.parse_type()?;
             let mut span = field_span.merge(ty.span());
             if self.match_with(|k| matches!(k, TokenKind::Comma)) {
@@ -382,7 +382,7 @@ impl<'a> Parser<'a> {
         if !self.check(|k| matches!(k, TokenKind::RightParen)) {
             loop {
                 let (param_name, param_span) = self.expect_identifier("parameter name")?;
-                self.expect_with("'::'", |k| matches!(k, TokenKind::ColonColon))?;
+                self.expect_type_separator()?;
                 let ty = self.parse_type()?;
                 params.push(Param {
                     name: param_name,
@@ -506,7 +506,7 @@ impl<'a> Parser<'a> {
         };
         let (name, name_span) = self.expect_identifier("variable name")?;
         let mut span = name_span;
-        let ty = if self.match_with(|k| matches!(k, TokenKind::ColonColon)) {
+        let ty = if self.match_type_separator() {
             let ty = self.parse_type()?;
             span = span.merge(ty.span());
             Some(ty)
@@ -910,7 +910,14 @@ impl<'a> Parser<'a> {
 
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_primary()?;
+        let mut pending_type_args: Option<Vec<TypeExpr>> = None;
         loop {
+            if pending_type_args.is_none() && expr.is_path_like() {
+                if let Some(args) = self.try_parse_trailing_type_args() {
+                    pending_type_args = Some(args);
+                    continue;
+                }
+            }
             if self.match_with(|k| matches!(k, TokenKind::LeftParen)) {
                 let mut args = Vec::new();
                 if !self.check(|k| matches!(k, TokenKind::RightParen)) {
@@ -927,6 +934,7 @@ impl<'a> Parser<'a> {
                 expr = Expr::Call {
                     callee: Box::new(expr),
                     args,
+                    type_args: pending_type_args.take().unwrap_or_default(),
                     span,
                 };
                 continue;
@@ -996,7 +1004,8 @@ impl<'a> Parser<'a> {
                 && expr.is_path_like()
                 && self.struct_literal_follows()
             {
-                expr = self.parse_struct_literal(expr)?;
+                let type_args = pending_type_args.take().unwrap_or_default();
+                expr = self.parse_struct_literal(expr, type_args)?;
                 continue;
             }
             break;
@@ -1126,12 +1135,16 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_struct_literal(&mut self, path: Expr) -> Result<Expr, ParseError> {
+    fn parse_struct_literal(
+        &mut self,
+        path: Expr,
+        type_args: Vec<TypeExpr>,
+    ) -> Result<Expr, ParseError> {
         self.expect_with("'{'", |k| matches!(k, TokenKind::LeftBrace))?;
         let mut fields = Vec::new();
         while !self.check(|k| matches!(k, TokenKind::RightBrace)) {
             let (field_name, field_span) = self.expect_identifier("struct literal field")?;
-            self.expect_with("':'", |k| matches!(k, TokenKind::Colon))?;
+            self.expect_type_separator()?;
             let expr = self.parse_expression()?;
             let span = field_span.merge(expr.span());
             fields.push(StructLiteralField {
@@ -1147,9 +1160,32 @@ impl<'a> Parser<'a> {
         let span = path.span().merge(close.span);
         Ok(Expr::StructLiteral {
             path: Box::new(path),
+            type_args,
             fields,
             span,
         })
+    }
+
+    fn try_parse_trailing_type_args(&mut self) -> Option<Vec<TypeExpr>> {
+        if !self.check(|k| matches!(k, TokenKind::Less)) {
+            return None;
+        }
+        let checkpoint = self.index;
+        self.advance(); // consume '<'
+        match self.parse_type_arguments() {
+            Ok(args) => {
+                if self.check(|k| matches!(k, TokenKind::LeftParen | TokenKind::LeftBrace)) {
+                    Some(args)
+                } else {
+                    self.index = checkpoint;
+                    None
+                }
+            }
+            Err(_) => {
+                self.index = checkpoint;
+                None
+            }
+        }
     }
 
     fn parse_lambda(&mut self) -> Result<Expr, ParseError> {
@@ -1165,7 +1201,7 @@ impl<'a> Parser<'a> {
         if !self.check(|k| matches!(k, TokenKind::RightParen)) {
             loop {
                 let (name, name_span) = self.expect_identifier("lambda parameter")?;
-                let ty = if self.match_with(|k| matches!(k, TokenKind::ColonColon)) {
+                let ty = if self.match_type_separator() {
                     Some(self.parse_type()?)
                 } else {
                     None
@@ -1457,10 +1493,24 @@ impl<'a> Parser<'a> {
 
     fn struct_literal_follows(&self) -> bool {
         match (self.peek_kind_at(1), self.peek_kind_at(2)) {
-            (Some(TokenKind::Identifier(_)), Some(TokenKind::Colon)) => true,
+            (
+                Some(TokenKind::Identifier(_)),
+                Some(TokenKind::Colon | TokenKind::ColonColon),
+            ) => true,
             (Some(TokenKind::RightBrace), _) => true,
             _ => false,
         }
+    }
+
+    fn match_type_separator(&mut self) -> bool {
+        self.match_with(|k| matches!(k, TokenKind::Colon | TokenKind::ColonColon))
+    }
+
+    fn expect_type_separator(&mut self) -> Result<Token, ParseError> {
+        self.expect_with(
+            "'::'",
+            |k| matches!(k, TokenKind::Colon | TokenKind::ColonColon),
+        )
     }
 
     fn is_at_end(&self) -> bool {

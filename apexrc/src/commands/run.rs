@@ -3,12 +3,15 @@ use nightscript_android::module_loader::ModuleLoader;
 use nightscript_android::runtime::Interpreter;
 
 use crate::{
-    commands::build::{build_project, BuildArtifact},
+    commands::build::{artifact_path, build_project, BuildArtifact},
     ProjectContext,
 };
 
 pub fn run_project(ctx: &mut ProjectContext) -> Result<()> {
     let artifact = build_project(ctx)?;
+    if let Ok(path) = artifact_path(ctx, false) {
+        println!("Running {}", path.display());
+    }
     execute_artifact(ctx, &artifact)
 }
 

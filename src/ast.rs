@@ -263,6 +263,7 @@ pub enum Expr {
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+        type_args: Vec<TypeExpr>,
         span: Span,
     },
     Await {
@@ -287,6 +288,7 @@ pub enum Expr {
     },
     StructLiteral {
         path: Box<Expr>,
+        type_args: Vec<TypeExpr>,
         fields: Vec<StructLiteralField>,
         span: Span,
     },

@@ -14,8 +14,19 @@ pub fn check_project(ctx: &ProjectContext) -> Result<()> {
             files += 1;
             let contents = fs::read_to_string(entry.path())?;
             if let Err(err) = parse_source(&contents) {
-                let msg = diagnostics::format_error(&contents, &err);
-                println!("{}:\n{}", entry.path().display(), msg);
+                match err.downcast::<diagnostics::AfnsError>() {
+                    Ok(diag_err) => {
+                        let msg = diagnostics::format_error(&contents, &diag_err);
+                        println!("{}:\n{}", entry.path().display(), msg);
+                    }
+                    Err(original) => {
+                        println!(
+                            "{}:\nerror: {}",
+                            entry.path().display(),
+                            original
+                        );
+                    }
+                }
                 return Ok(());
             }
         }

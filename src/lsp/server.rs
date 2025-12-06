@@ -17,7 +17,7 @@ use crate::token::TokenKind;
 
 pub async fn run_stdio_server() -> Result<()> {
     let (service, socket) = LspService::new(|client| Backend::new(client));
-    Server::new(stdin(), stdout(), socket).serve(service).await?;
+    Server::new(stdin(), stdout(), socket).serve(service).await;
     Ok(())
 }
 
@@ -63,6 +63,7 @@ impl LanguageServer for Backend {
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
                     trigger_characters: Some(vec![".".to_string()]),
+                    completion_item: None,
                     work_done_progress_options: Default::default(),
                     all_commit_characters: None,
                 }),

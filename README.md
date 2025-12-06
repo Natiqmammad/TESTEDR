@@ -74,34 +74,30 @@
 ### **Examples Provided**
 ```
 examples/
-  basic.afml              ✅ Phase 1 (scalars, math, if/else)
-  collections.afml        ✅ Phase 2 (vec, str, result, option)
-  async_timeout.afml      ✅ Phase 3 (async, await, sleep)
-  error_handling.afml     ✅ Phase 1+ (result, error propagation)
-  performance_test.afml   ✅ Phase 1+ (fibonacci, vector ops, math)
-  test_indexing.afml      ✅ Phase 1+ (array/string indexing)
-  test_methods.afml       ✅ Phase 2 (method calls, extended operations)
-  test_map.afml           ✅ Phase 2 (map/dict operations)
-  test_async_basic.afml   ✅ Phase 3 (async/await, sleep)
-  test_async_phase3.afml  ✅ Phase 3 (parallel, race, timeout)
-  android_test.afml       ✅ Phase 4 (Activity lifecycle, permissions, storage)
-  flutter_test.afml       ✅ Phase 4 (Widget tree, UI components)
-  web_test.afml           ✅ Phase 4 (HTTP server, routes, request/response)
-  async_http.afml         ⏳ Phase 5 (HTTP client)
-  memory.afml             ⏳ Phase 1+ (low-level memory)
+  minimal_hello/          ✅ Phase 1 (scaffolded hello world)
+  generics_basic/         ✅ Phase 2 (vec, option, result, identity<T>)
+  generics_collections/   ✅ Phase 2 (map<str, vec<str>>, set, option)
+  custom_generic_type/    ✅ Phase 2 (structs + generic helpers)
+  ui/                     ✅ Phase 4 (Flutter-style layouts, stubs)
 ```
 
 ### **How to Run Examples**
 ```bash
-# Parse and show AST
-cargo run -- examples/basic.afml --ast
-
-# Execute with interpreter
-cargo run -- examples/basic.afml --run
-
-# Show tokens
-cargo run -- examples/basic.afml --tokens
+cd examples/minimal_hello
+apexrc build
+apexrc run
 ```
+
+## **Getting Started (apexrc)**
+
+```bash
+apexrc new hello
+cd hello
+apexrc build
+apexrc run
+```
+
+`apexrc build` emits a `.nexec` artifact under `target/debug/` and `apexrc run` immediately executes it with the built-in interpreter (no native binary rewrite required). Every scaffolded project ships with `fun apex()` as the entry point, and the `examples/` directory now contains full `apexrc` projects (`examples/minimal_hello`, `examples/generics_basic`, `examples/generics_collections`, `examples/custom_generic_type`) that follow the same workflow.
 
 ---
 

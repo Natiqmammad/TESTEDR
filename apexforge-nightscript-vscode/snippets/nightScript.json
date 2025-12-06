@@ -2,7 +2,7 @@
   "Function": {
     "prefix": "af-fun",
     "body": [
-      "fun ${1:name}(${2:params}) -> ${3:Type} {",
+      "fun ${1:name}(${2:param}:: ${3:Type}) -> ${4:ReturnType} {",
       "    ${0:// body}",
       "}"
     ],
@@ -11,11 +11,23 @@
   "AsyncFunction": {
     "prefix": "af-async",
     "body": [
-      "async fun ${1:name}(${2:params}) -> async ${3:Type} {",
+      "async fun ${1:name}(${2:param}:: ${3:Type}) -> async ${4:ReturnType} {",
       "    ${0:// await work}",
       "}"
     ],
     "description": "Define an async function returning a future"
+  },
+  "Entrypoint": {
+    "prefix": "af-apex",
+    "body": [
+      "import forge;",
+      "import forge.log as log;",
+      "",
+      "fun apex() {",
+      "    log.info(\"Hello from AFNS!\");",
+      "}"
+    ],
+    "description": "Scaffold the canonical apex entrypoint"
   },
   "Struct": {
     "prefix": "af-struct",

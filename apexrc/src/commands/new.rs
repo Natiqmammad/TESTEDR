@@ -3,23 +3,31 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 
-const TEMPLATE: &str = include_str!("../../Apex.toml");
+const TEMPLATE_MANIFEST: &str = include_str!("../../templates/afml/Apex.toml");
+const TEMPLATE_GITIGNORE: &str = include_str!("../../templates/afml/.gitignore");
+const TEMPLATE_README: &str = include_str!("../../templates/afml/README_PROJECT.md");
 
-pub fn create_project(name: &str, dir: Option<PathBuf>) -> Result<()> {
-    let target_dir = dir.unwrap_or_else(|| std::env::current_dir().unwrap().join(name));
+pub fn create_project(path: &Path, explicit_name: Option<&str>) -> Result<()> {
+    let target_dir = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
     if target_dir.exists() {
         bail!("directory {} already exists", target_dir.display());
     }
-    create_structure(&target_dir, name, true)?;
-    println!("Created ApexForge project `{name}` at {}", target_dir.display());
+    let name = project_name(explicit_name, &target_dir);
+    create_structure(&target_dir, &name, true)?;
+    println!(
+        "Created ApexForge project `{}` at {}",
+        name,
+        target_dir.display()
+    );
     Ok(())
 }
 
 pub fn create_structure(dir: &Path, name: &str, must_create_dir: bool) -> Result<()> {
-    if must_create_dir {
-        fs::create_dir_all(dir)
-            .with_context(|| format!("failed to create directory {}", dir.display()))?;
-    } else if !dir.exists() {
+    if must_create_dir || !dir.exists() {
         fs::create_dir_all(dir)
             .with_context(|| format!("failed to create directory {}", dir.display()))?;
     }
@@ -33,7 +41,7 @@ pub fn create_structure(dir: &Path, name: &str, must_create_dir: bool) -> Result
     fs::create_dir_all(&src_dir).with_context(|| format!("failed to create {}", src_dir.display()))?;
 
     let manifest = dir.join("Apex.toml");
-    if manifest.exists() {
+    if manifest.exists() && must_create_dir {
         return Err(anyhow!(
             "{} already exists",
             manifest.strip_prefix(dir).unwrap_or(&manifest).display()
@@ -41,23 +49,57 @@ pub fn create_structure(dir: &Path, name: &str, must_create_dir: bool) -> Result
     }
 
     write_file(&manifest, render_template(name))?;
-    write_file(
-        &src_dir.join("main.afml"),
-        format!(
-            "import forge.log as log;\n\nfun apex() {{\n    log.info(\"Hello from {name}!\");\n}}\n"
-        ),
-    )?;
-    write_file(
-        &src_dir.join("lib.afml"),
-        "fun helper() {\n    // Library code goes here\n}\n".to_string(),
-    )?;
+    write_file(&src_dir.join("main.afml"), default_main_source())?;
+    write_file(&src_dir.join("lib.afml"), default_lib_source())?;
+    write_if_absent(&dir.join(".gitignore"), TEMPLATE_GITIGNORE)?;
+    write_if_absent(&dir.join("README.md"), render_readme(name).as_str())?;
+    let target_dir = dir.join("target");
+    fs::create_dir_all(&target_dir)
+        .with_context(|| format!("failed to create {}", target_dir.display()))?;
+    let gitkeep = target_dir.join(".gitkeep");
+    if !gitkeep.exists() {
+        fs::write(&gitkeep, b"").with_context(|| format!("failed to write {}", gitkeep.display()))?;
+    }
     Ok(())
 }
 
 fn render_template(name: &str) -> String {
-    TEMPLATE.replace("{{name}}", name)
+    TEMPLATE_MANIFEST.replace("{{name}}", name)
+}
+
+fn render_readme(name: &str) -> String {
+    TEMPLATE_README.replace("{{name}}", name)
+}
+
+fn default_main_source() -> String {
+    "import forge;\nimport forge.log as log;\n\nfun apex() {\n    log.info(\"Hello from AFNS!\");\n}\n"
+        .to_string()
+}
+
+fn default_lib_source() -> String {
+    "fun helper() {\n    // Library code goes here\n}\n".to_string()
 }
 
 fn write_file(path: &Path, contents: String) -> Result<()> {
     fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_if_absent(path: &Path, contents: &str) -> Result<()> {
+    if !path.exists() {
+        fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn project_name(explicit: Option<&str>, dir: &Path) -> String {
+    if let Some(name) = explicit {
+        if !name.trim().is_empty() {
+            return name.to_string();
+        }
+    }
+    dir.file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "apex_project".to_string())
 }

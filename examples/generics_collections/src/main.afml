@@ -1,0 +1,37 @@
+import forge;
+import forge.log as log;
+
+fun apex() {
+    let routes:: map<str, vec<str>> = map.new();
+
+    let http:: vec<str> = vec.new();
+    vec.push(http, "/health");
+    vec.push(http, "/metrics");
+    map.put(routes, "http", http);
+
+    let ws:: vec<str> = vec.new();
+    vec.push(ws, "/subscribe");
+    vec.push(ws, "/events");
+    map.put(routes, "ws", ws);
+
+    let names:: vec<str> = map.keys(routes);
+    log.info("Services:", names);
+
+    let maybe_http:: option<vec<str>> = map.get(routes, "http");
+    let http_list:: vec<str> = maybe_http?;
+    log.info("HTTP routes:", http_list);
+
+    let extra:: vec<str> = vec.new();
+    vec.push(extra, "/status");
+    vec.extend(http_list, extra);
+
+    let used:: set<str> = set.new();
+    set.insert(used, "forge.net");
+    set.insert(used, "forge.math");
+    let module_count:: i32 = set.len(used);
+    log.info("Modules used:", module_count);
+
+    let backup:: option<vec<str>> = option.some(http_list);
+    let restored:: vec<str> = backup?;
+    log.info("Restored:", restored);
+}

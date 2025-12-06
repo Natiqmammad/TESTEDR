@@ -1,1 +1,18 @@
-/target
+# apexrc build artifacts
+target/
+**/target/
+*.nexec
+
+# AFML project scaffolds
+examples/**/target/
+
+# VSIX və Node
+apexforge-nightscript-vscode/node_modules/
+apexforge-nightscript-vscode/*.vsix
+node_modules/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,6 @@
+import forge;
+import forge.log as log;
+
+fun apex() {
+    log.info("Hello from AFNS!");
+}

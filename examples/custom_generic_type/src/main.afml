@@ -1,0 +1,15 @@
+import forge;
+import forge.log as log;
+
+struct User { id:: i32, name:: str }
+
+fun echo<T>(value:: T) -> T {
+    log.info("Value:", value);
+    return value;
+}
+
+fun apex() {
+    let user:: User = User { id:: 1, name:: "ApexForge" };
+    let mirrored:: User = echo<User>(user);
+    log.info("Final:", mirrored);
+}

@@ -1,0 +1,39 @@
+import forge;
+import forge.log as log;
+
+fun identity<T>(x:: T) -> T {
+    return x;
+}
+
+fun safe_head<T>(xs:: vec<T>) -> option<T> {
+    let n:: i32 = vec.len(xs);
+    if n == 0 {
+        return option.none();
+    }
+    return option.some(xs[0]);
+}
+
+fun ensure_positive(x:: i32) -> result<i32, str> {
+    if x >= 0 {
+        return result.ok(x);
+    }
+    return result.err("value must be >= 0");
+}
+
+fun apex() {
+    let names:: vec<str> = vec.new();
+    vec.push(names, "ApexForge");
+    vec.push(names, "NightScript");
+
+    let head:: str = safe_head(names)?;
+    log.info("Head:", head);
+
+    let same:: str = identity(head);
+    log.info("Identity:", same);
+
+    let okv:: result<i32, str> = ensure_positive(7);
+    log.info("OK:", okv);
+
+    let errv:: result<i32, str> = ensure_positive(-1);
+    log.info("ERR:", errv);
+}
