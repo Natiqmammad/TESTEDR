@@ -1,0 +1,30 @@
+{% extends "layout.html" %}
+{% block title %}ApexForge Registry{% endblock %}
+{% block content %}
+<section class="bg-white shadow rounded-lg p-8 mb-8">
+    <h1 class="text-3xl font-semibold mb-4">Build. Share. Reuse.</h1>
+    <p class="text-slate-600 mb-6">Publish AFML libraries to your local registry and pull them into any project with cargo-like commands.</p>
+    <form action="/packages" method="get" class="flex gap-3">
+        <input type="text" name="search" placeholder="Search packages…" class="flex-1 border rounded px-4 py-2" />
+        <button type="submit" class="bg-indigo-600 text-white px-4 py-2 rounded">Search</button>
+    </form>
+    <div class="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+        <div class="p-4 bg-slate-100 rounded">
+            <h2 class="font-semibold mb-2">Publish</h2>
+            <code class="text-xs bg-white px-2 py-1 rounded block">apexrc publish</code>
+        </div>
+        <div class="p-4 bg-slate-100 rounded">
+            <h2 class="font-semibold mb-2">Add</h2>
+            <code class="text-xs bg-white px-2 py-1 rounded block">apexrc add forge.log</code>
+        </div>
+        <div class="p-4 bg-slate-100 rounded">
+            <h2 class="font-semibold mb-2">Install</h2>
+            <code class="text-xs bg-white px-2 py-1 rounded block">apexrc install</code>
+        </div>
+    </div>
+</section>
+<section class="bg-white shadow rounded-lg p-6">
+    <h2 class="text-xl font-semibold mb-4">Browse packages</h2>
+    <a href="/packages" class="text-indigo-600 hover:underline text-sm">View all packages →</a>
+</section>
+{% endblock %}

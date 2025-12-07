@@ -1,0 +1,5 @@
+[package]
+name = "net_udp_loopback"
+version = "0.1.0"
+
+[dependencies]

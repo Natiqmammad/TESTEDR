@@ -1,15 +1,18 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::ast::{
-    Block, Expr, File, Import, Item, Literal, NamedType, Param, Pattern, Stmt, SwitchStmt, TryCatch,
-    TypeExpr,
+    Block, Expr, File, IfStmt, Import, Item, Literal, NamedType, Param, Pattern, Stmt, SwitchStmt,
+    TryCatch, TypeExpr,
 };
 use crate::module_loader::ModuleLoader;
 
@@ -27,6 +30,7 @@ pub mod flutter;
 pub mod flutter_layers;
 pub mod flutter_scene;
 pub mod flutter_vm;
+mod forge;
 pub mod web;
 
 #[derive(Debug)]
@@ -62,6 +66,11 @@ pub type RuntimeResult<T> = Result<T, RuntimeError>;
 
 #[derive(Clone, Debug)]
 struct Env(Rc<RefCell<EnvData>>);
+
+static NET_SOCKETS: OnceLock<Mutex<HashMap<i64, TcpStream>>> = OnceLock::new();
+static NET_LISTENERS: OnceLock<Mutex<HashMap<i64, TcpListener>>> = OnceLock::new();
+static NET_UDP: OnceLock<Mutex<HashMap<i64, UdpSocket>>> = OnceLock::new();
+static NEXT_NET_ID: AtomicI64 = AtomicI64::new(1);
 
 #[derive(Clone, Debug)]
 struct EnvData {
@@ -157,7 +166,11 @@ impl TypeTag {
             TypeTag::Option(inner) => format!("option<{}>", inner.describe()),
             TypeTag::Result(ok, err) => format!("result<{}, {}>", ok.describe(), err.describe()),
             TypeTag::Tuple(items) => {
-                let inner = items.iter().map(|t| t.describe()).collect::<Vec<_>>().join(", ");
+                let inner = items
+                    .iter()
+                    .map(|t| t.describe())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("tuple({inner})")
             }
             TypeTag::Struct { name, params } => format_named_with_generics(name, params),
@@ -171,7 +184,11 @@ fn format_named_with_generics(name: &str, params: &[TypeTag]) -> String {
     if params.is_empty() {
         name.to_string()
     } else {
-        let inner = params.iter().map(|p| p.describe()).collect::<Vec<_>>().join(", ");
+        let inner = params
+            .iter()
+            .map(|p| p.describe())
+            .collect::<Vec<_>>()
+            .join(", ");
         format!("{name}<{inner}>")
     }
 }
@@ -200,11 +217,13 @@ fn type_tag_from_type_expr_with_bindings(
     match expr {
         TypeExpr::Named(named) => type_tag_from_named(named, bindings),
         TypeExpr::Slice { element, .. } | TypeExpr::Reference { inner: element, .. } => {
-            TypeTag::Vec(Box::new(type_tag_from_type_expr_with_bindings(element, bindings)))
+            TypeTag::Vec(Box::new(type_tag_from_type_expr_with_bindings(
+                element, bindings,
+            )))
         }
-        TypeExpr::Array { element, .. } => {
-            TypeTag::Vec(Box::new(type_tag_from_type_expr_with_bindings(element, bindings)))
-        }
+        TypeExpr::Array { element, .. } => TypeTag::Vec(Box::new(
+            type_tag_from_type_expr_with_bindings(element, bindings),
+        )),
         TypeExpr::Tuple { elements, .. } => TypeTag::Tuple(
             elements
                 .iter()
@@ -214,10 +233,7 @@ fn type_tag_from_type_expr_with_bindings(
     }
 }
 
-fn type_tag_from_named(
-    named: &NamedType,
-    bindings: &HashMap<String, TypeTag>,
-) -> TypeTag {
+fn type_tag_from_named(named: &NamedType, bindings: &HashMap<String, TypeTag>) -> TypeTag {
     if named.segments.len() == 1 {
         let seg = &named.segments[0];
         if let Some(bound) = bindings.get(&seg.name) {
@@ -294,10 +310,7 @@ fn type_tag_from_named(
                     .map(|s| s.name.clone())
                     .collect::<Vec<_>>()
                     .join("::");
-                TypeTag::Struct {
-                    name: path,
-                    params,
-                }
+                TypeTag::Struct { name: path, params }
             }
         }
     }
@@ -426,18 +439,8 @@ fn bind_type_params_from_type_expr(
                         (last.generics.get(0), last.generics.get(1))
                     {
                         if let TypeTag::Result(ok_tag, err_tag) = actual {
-                            bind_type_params_from_type_expr(
-                                ok_ty,
-                                ok_tag,
-                                type_params,
-                                bindings,
-                            );
-                            bind_type_params_from_type_expr(
-                                err_ty,
-                                err_tag,
-                                type_params,
-                                bindings,
-                            );
+                            bind_type_params_from_type_expr(ok_ty, ok_tag, type_params, bindings);
+                            bind_type_params_from_type_expr(err_ty, err_tag, type_params, bindings);
                         }
                     }
                 }
@@ -446,12 +449,7 @@ fn bind_type_params_from_type_expr(
                         (last.generics.get(0), last.generics.get(1))
                     {
                         if let TypeTag::Map(key_tag, value_tag) = actual {
-                            bind_type_params_from_type_expr(
-                                key_ty,
-                                key_tag,
-                                type_params,
-                                bindings,
-                            );
+                            bind_type_params_from_type_expr(key_ty, key_tag, type_params, bindings);
                             bind_type_params_from_type_expr(
                                 value_ty,
                                 value_tag,
@@ -646,10 +644,7 @@ pub struct MapValue {
 }
 
 impl MapValue {
-    fn new(
-        key_type: Option<TypeTag>,
-        value_type: Option<TypeTag>,
-    ) -> Self {
+    fn new(key_type: Option<TypeTag>, value_type: Option<TypeTag>) -> Self {
         Self {
             key_type,
             value_type,
@@ -751,17 +746,43 @@ type CallableId = Value;
 #[derive(Clone, Debug)]
 pub enum FutureKind {
     UserFunction(UserFunction, Option<Vec<Value>>),
-    Callable { func: Value, args: Vec<Value> },
-    Spawn { func: Value, args: Vec<Value> },
-    Then { base: Box<FutureValue>, on_ok: Value },
-    Catch { base: Box<FutureValue>, on_err: Value },
-    Finally { base: Box<FutureValue>, on_finally: Value },
+    Callable {
+        func: Value,
+        args: Vec<Value>,
+    },
+    Spawn {
+        func: Value,
+        args: Vec<Value>,
+    },
+    Then {
+        base: Box<FutureValue>,
+        on_ok: Value,
+    },
+    Catch {
+        base: Box<FutureValue>,
+        on_err: Value,
+    },
+    Finally {
+        base: Box<FutureValue>,
+        on_finally: Value,
+    },
     Sleep(u64),
-    Timeout { duration_ms: u64, callback: CallableId },
-    Parallel { tasks: Vec<Value> },
-    Race { tasks: Vec<Value> },
-    All { tasks: Vec<Value> },
-    Any { tasks: Vec<Value> },
+    Timeout {
+        duration_ms: u64,
+        callback: CallableId,
+    },
+    Parallel {
+        tasks: Vec<Value>,
+    },
+    Race {
+        tasks: Vec<Value>,
+    },
+    All {
+        tasks: Vec<Value>,
+    },
+    Any {
+        tasks: Vec<Value>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1036,9 +1057,17 @@ impl FutureValue {
                                 pending = true;
                             }
                         },
-                        Value::Closure(c) => results.push(interp.call_closure(c.clone(), Vec::new())?),
-                        Value::Function(func) => results.push(interp.call_user_function(func.clone(), Vec::new())?),
-                        _ => return Err(RuntimeError::new("Expected callable or future in parallel task")),
+                        Value::Closure(c) => {
+                            results.push(interp.call_closure(c.clone(), Vec::new())?)
+                        }
+                        Value::Function(func) => {
+                            results.push(interp.call_user_function(func.clone(), Vec::new())?)
+                        }
+                        _ => {
+                            return Err(RuntimeError::new(
+                                "Expected callable or future in parallel task",
+                            ))
+                        }
                     };
                 }
                 if pending {
@@ -1272,9 +1301,15 @@ impl Value {
                     .join(", ");
                 format!("set{{{items}}}")
             }
-            Value::Result(ResultValue::Ok { value, .. }) => format!("Ok({})", value.to_string_value()),
-            Value::Result(ResultValue::Err { value, .. }) => format!("Err({})", value.to_string_value()),
-            Value::Option(OptionValue::Some { value, .. }) => format!("Some({})", value.to_string_value()),
+            Value::Result(ResultValue::Ok { value, .. }) => {
+                format!("Ok({})", value.to_string_value())
+            }
+            Value::Result(ResultValue::Err { value, .. }) => {
+                format!("Err({})", value.to_string_value())
+            }
+            Value::Option(OptionValue::Some { value, .. }) => {
+                format!("Some({})", value.to_string_value())
+            }
             Value::Option(OptionValue::None { .. }) => "None".to_string(),
             Value::Future(_) => "<future>".to_string(),
             Value::Struct(instance) => {
@@ -1677,6 +1712,33 @@ impl Interpreter {
                 let r = self.eval_expr(right, env)?;
                 self.eval_binary(*op, l, r)
             }
+            Expr::If(if_stmt) => {
+                let cond = self.eval_expr(&if_stmt.condition, env)?;
+                if cond.is_truthy() {
+                    self.execute_block(&if_stmt.then_branch, env.child())
+                        .map(|signal| match signal {
+                            ExecSignal::Return(v) => v,
+                            ExecSignal::None => Value::Null,
+                        })
+                } else if let Some((else_cond, else_block)) = if_stmt.else_if.first() {
+                    let else_if = IfStmt {
+                        condition: else_cond.clone(),
+                        then_branch: else_block.clone(),
+                        else_if: if_stmt.else_if[1..].to_vec(),
+                        else_branch: if_stmt.else_branch.clone(),
+                        span: if_stmt.span,
+                    };
+                    self.eval_expr(&Expr::If(Box::new(else_if)), env)
+                } else if let Some(block) = &if_stmt.else_branch {
+                    self.execute_block(block, env.child())
+                        .map(|signal| match signal {
+                            ExecSignal::Return(v) => v,
+                            ExecSignal::None => Value::Null,
+                        })
+                } else {
+                    Ok(Value::Null)
+                }
+            }
             Expr::Unary { op, expr, .. } => {
                 let value = self.eval_expr(expr, env)?;
                 self.eval_unary(*op, value)
@@ -1755,10 +1817,7 @@ impl Interpreter {
                             }
                         })
                         .collect::<Vec<_>>();
-                    let tag = TypeTag::Struct {
-                        name,
-                        params,
-                    };
+                    let tag = TypeTag::Struct { name, params };
                     apply_type_tag_to_value(&mut struct_value, &tag);
                 }
                 Ok(struct_value)
@@ -1785,11 +1844,11 @@ impl Interpreter {
                         Err(RuntimeError::propagate(*value))
                     }
                     Value::Option(OptionValue::Some { value, .. }) => Ok(*value),
-                    Value::Option(OptionValue::None { elem_type }) => Err(
-                        RuntimeError::propagate(Value::Option(OptionValue::None {
+                    Value::Option(OptionValue::None { elem_type }) => {
+                        Err(RuntimeError::propagate(Value::Option(OptionValue::None {
                             elem_type: elem_type.clone(),
-                        })),
-                    ),
+                        })))
+                    }
                     _ => Err(RuntimeError::new("`?` expects result<T,E> or option<T>")),
                 }
             }
@@ -1971,6 +2030,19 @@ impl Interpreter {
                 };
                 Ok(Value::Bool(value))
             }
+            Range => {
+                let start = self.as_number(left)? as i64;
+                let end = self.as_number(right)? as i64;
+                let mut items = Vec::new();
+                for i in start..end {
+                    items.push(Value::Int(i));
+                }
+                let vec = VecValue {
+                    elem_type: Some(TypeTag::Primitive(PrimitiveType::Int)),
+                    items,
+                };
+                Ok(Value::Vec(Rc::new(RefCell::new(vec))))
+            }
         }
     }
 
@@ -2071,21 +2143,18 @@ impl Interpreter {
                     .all(|(x, y)| self.values_equal(x, y))
             }
             (Value::Result(a), Value::Result(b)) => match (a, b) {
-                (
-                    ResultValue::Ok { value: x, .. },
-                    ResultValue::Ok { value: y, .. },
-                ) => self.values_equal(x, y),
-                (
-                    ResultValue::Err { value: x, .. },
-                    ResultValue::Err { value: y, .. },
-                ) => self.values_equal(x, y),
+                (ResultValue::Ok { value: x, .. }, ResultValue::Ok { value: y, .. }) => {
+                    self.values_equal(x, y)
+                }
+                (ResultValue::Err { value: x, .. }, ResultValue::Err { value: y, .. }) => {
+                    self.values_equal(x, y)
+                }
                 _ => false,
             },
             (Value::Option(a), Value::Option(b)) => match (a, b) {
-                (
-                    OptionValue::Some { value: x, .. },
-                    OptionValue::Some { value: y, .. },
-                ) => self.values_equal(x, y),
+                (OptionValue::Some { value: x, .. }, OptionValue::Some { value: y, .. }) => {
+                    self.values_equal(x, y)
+                }
                 (OptionValue::None { .. }, OptionValue::None { .. }) => true,
                 _ => false,
             },
@@ -2330,7 +2399,10 @@ fn register_builtins(env: &Env) {
             map.insert("catch".to_string(), Value::Builtin(builtin_async_catch));
             map.insert("catch_fn".to_string(), Value::Builtin(builtin_async_catch));
             map.insert("finally".to_string(), Value::Builtin(builtin_async_finally));
-            map.insert("finally_fn".to_string(), Value::Builtin(builtin_async_finally));
+            map.insert(
+                "finally_fn".to_string(),
+                Value::Builtin(builtin_async_finally),
+            );
             map.insert("cancel".to_string(), Value::Builtin(builtin_async_cancel));
             map.insert(
                 "is_cancelled".to_string(),
@@ -2498,6 +2570,9 @@ fn register_builtins(env: &Env) {
     forge_fields.insert("flutter".to_string(), flutter_module);
     forge_fields.insert("web".to_string(), web_module);
     forge_fields.insert("panic".to_string(), panic_fn);
+    forge_fields.insert("fs".to_string(), fs_module());
+    forge_fields.insert("net".to_string(), net_module());
+    forge_fields.insert("db".to_string(), forge::db::forge_db_module());
 
     env.define(
         "forge",
@@ -2524,6 +2599,1466 @@ fn builtin_panic(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Val
         .map(|v| v.to_string_value())
         .unwrap_or_else(|| "panic!".to_string());
     Err(RuntimeError::new(format!("panic: {message}")))
+}
+
+// ---------------------------
+// forge.fs
+// ---------------------------
+fn fs_module() -> Value {
+    fn err_tag() -> Option<TypeTag> {
+        Some(TypeTag::Primitive(PrimitiveType::String))
+    }
+
+    fn unit_tag() -> Option<TypeTag> {
+        Some(TypeTag::Tuple(Vec::new()))
+    }
+
+    fn wrap_ok(value: Value, ok_type: Option<TypeTag>) -> RuntimeResult<Value> {
+        Ok(result_ok_value(value, ok_type, err_tag()))
+    }
+
+    fn io_err_to_result(err: std::io::Error, ok_type: Option<TypeTag>) -> RuntimeResult<Value> {
+        Ok(result_err_value(
+            Value::String(err.to_string()),
+            ok_type,
+            err_tag(),
+        ))
+    }
+
+    fn copy_dir_recursive_impl(
+        src: &std::path::Path,
+        dst: &std::path::Path,
+    ) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let path = entry.path();
+            let target = dst.join(entry.file_name());
+            let ft = entry.file_type()?;
+            if ft.is_dir() {
+                copy_dir_recursive_impl(&path, &target)?;
+            } else if ft.is_file() {
+                std::fs::copy(&path, &target)?;
+            } else if ft.is_symlink() {
+                #[cfg(unix)]
+                {
+                    let link_target = std::fs::read_link(&path)?;
+                    std::os::unix::fs::symlink(&link_target, &target)?;
+                }
+                #[cfg(windows)]
+                {
+                    let link_target = std::fs::read_link(&path)?;
+                    if std::fs::metadata(&link_target)
+                        .map(|m| m.is_dir())
+                        .unwrap_or(false)
+                    {
+                        std::os::windows::fs::symlink_dir(&link_target, &target)?;
+                    } else {
+                        std::os::windows::fs::symlink_file(&link_target, &target)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn is_cross_device(err: &std::io::Error) -> bool {
+        matches!(err.raw_os_error(), Some(18) | Some(17))
+    }
+
+    fn fs_read_to_string(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.read_to_string")?;
+        let path = expect_string(&args[0])?;
+        let tag = Some(TypeTag::Primitive(PrimitiveType::String));
+        match std::fs::read_to_string(&path) {
+            Ok(s) => wrap_ok(Value::String(s), tag),
+            Err(e) => io_err_to_result(e, tag),
+        }
+    }
+
+    fn fs_read_bytes(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.read_bytes")?;
+        let path = expect_string(&args[0])?;
+        let elem_tag = TypeTag::Primitive(PrimitiveType::UInt);
+        let ok_tag = Some(TypeTag::Vec(Box::new(elem_tag.clone())));
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let vec_vals = bytes.into_iter().map(|b| Value::Int(b as i64)).collect();
+                wrap_ok(make_vec_value(vec_vals, Some(elem_tag)), ok_tag)
+            }
+            Err(e) => io_err_to_result(e, ok_tag),
+        }
+    }
+
+    fn fs_write_string(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "fs.write_string")?;
+        let path = expect_string(&args[0])?;
+        let contents = expect_string(&args[1])?;
+        match std::fs::write(&path, contents.as_bytes()) {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_write_bytes(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "fs.write_bytes")?;
+        let path = expect_string(&args[0])?;
+        let vec_rc = expect_vec(&args[1])?;
+        let data: Result<Vec<u8>, _> = vec_rc
+            .borrow()
+            .iter()
+            .map(|v| expect_int(v).map(|i| i as u8))
+            .collect();
+        let data = data.map_err(|e| RuntimeError::new(e.to_string()))?;
+        match std::fs::write(&path, data) {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_append_string(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "fs.append_string")?;
+        let path = expect_string(&args[0])?;
+        let contents = expect_string(&args[1])?;
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, contents.as_bytes()))
+        {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_append_bytes(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "fs.append_bytes")?;
+        let path = expect_string(&args[0])?;
+        let vec_rc = expect_vec(&args[1])?;
+        let data: Result<Vec<u8>, _> = vec_rc
+            .borrow()
+            .iter()
+            .map(|v| expect_int(v).map(|i| i as u8))
+            .collect();
+        let data = data.map_err(|e| RuntimeError::new(e.to_string()))?;
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, &data))
+        {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_create_dir(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.create_dir")?;
+        let path = expect_string(&args[0])?;
+        match std::fs::create_dir(&path) {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    return wrap_ok(Value::Null, unit_tag());
+                }
+                io_err_to_result(e, unit_tag())
+            }
+        }
+    }
+
+    fn fs_create_dir_all(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.create_dir_all")?;
+        let path = expect_string(&args[0])?;
+        match std::fs::create_dir_all(&path) {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_remove_dir(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.remove_dir")?;
+        let path = expect_string(&args[0])?;
+        match std::fs::remove_dir(&path) {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_remove_dir_all(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.remove_dir_all")?;
+        let path = expect_string(&args[0])?;
+        match std::fs::remove_dir_all(&path) {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_exists(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.exists")?;
+        let path = expect_string(&args[0])?;
+        Ok(Value::Bool(std::path::Path::new(&path).exists()))
+    }
+
+    fn fs_is_file(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.is_file")?;
+        let path = expect_string(&args[0])?;
+        Ok(Value::Bool(std::path::Path::new(&path).is_file()))
+    }
+
+    fn fs_is_dir(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.is_dir")?;
+        let path = expect_string(&args[0])?;
+        Ok(Value::Bool(std::path::Path::new(&path).is_dir()))
+    }
+
+    fn fs_metadata(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.metadata")?;
+        let path = expect_string(&args[0])?;
+        let meta_tag = Some(TypeTag::Struct {
+            name: "fs::FsMetadata".to_string(),
+            params: Vec::new(),
+        });
+        match std::fs::metadata(&path) {
+            Ok(meta) => {
+                let md = build_metadata_value(&meta);
+                wrap_ok(md, meta_tag)
+            }
+            Err(e) => io_err_to_result(e, meta_tag),
+        }
+    }
+
+    fn fs_join(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "fs.join")?;
+        let base = expect_string(&args[0])?;
+        let child = expect_string(&args[1])?;
+        let joined = std::path::Path::new(&base).join(child);
+        Ok(Value::String(joined.to_string_lossy().to_string()))
+    }
+
+    fn fs_dirname(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.dirname")?;
+        let path = expect_string(&args[0])?;
+        let dir = std::path::Path::new(&path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "".to_string());
+        Ok(Value::String(dir))
+    }
+
+    fn fs_parent(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.parent")?;
+        let path = expect_string(&args[0])?;
+        let opt = std::path::Path::new(&path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string());
+        if let Some(p) = opt {
+            Ok(option_some_value(
+                Value::String(p),
+                Some(TypeTag::Primitive(PrimitiveType::String)),
+            ))
+        } else {
+            Ok(option_none_value(Some(TypeTag::Primitive(
+                PrimitiveType::String,
+            ))))
+        }
+    }
+
+    fn fs_basename(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.basename")?;
+        let path = expect_string(&args[0])?;
+        let base = std::path::Path::new(&path)
+            .file_name()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "".to_string());
+        Ok(Value::String(base))
+    }
+
+    fn fs_file_stem(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.file_stem")?;
+        let path = expect_string(&args[0])?;
+        if let Some(stem) = std::path::Path::new(&path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+        {
+            Ok(option_some_value(
+                Value::String(stem.to_string()),
+                Some(TypeTag::Primitive(PrimitiveType::String)),
+            ))
+        } else {
+            Ok(option_none_value(Some(TypeTag::Primitive(
+                PrimitiveType::String,
+            ))))
+        }
+    }
+
+    fn fs_extension(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.extension")?;
+        let path = expect_string(&args[0])?;
+        if let Some(ext) = std::path::Path::new(&path)
+            .extension()
+            .and_then(|s| s.to_str())
+        {
+            Ok(option_some_value(
+                Value::String(ext.to_string()),
+                Some(TypeTag::Primitive(PrimitiveType::String)),
+            ))
+        } else {
+            Ok(option_none_value(Some(TypeTag::Primitive(
+                PrimitiveType::String,
+            ))))
+        }
+    }
+
+    fn fs_canonicalize(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.canonicalize")?;
+        let path = expect_string(&args[0])?;
+        let tag = Some(TypeTag::Primitive(PrimitiveType::String));
+        match std::fs::canonicalize(&path) {
+            Ok(p) => wrap_ok(Value::String(p.to_string_lossy().to_string()), tag),
+            Err(e) => io_err_to_result(e, tag),
+        }
+    }
+
+    fn fs_is_absolute(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.is_absolute")?;
+        let path = expect_string(&args[0])?;
+        Ok(Value::Bool(std::path::Path::new(&path).is_absolute()))
+    }
+
+    fn fs_strip_prefix(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "fs.strip_prefix")?;
+        let base = expect_string(&args[0])?;
+        let path = expect_string(&args[1])?;
+        let tag = Some(TypeTag::Primitive(PrimitiveType::String));
+        match std::path::Path::new(&path).strip_prefix(&base) {
+            Ok(p) => wrap_ok(Value::String(p.to_string_lossy().to_string()), tag),
+            Err(e) => io_err_to_result(
+                std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                tag,
+            ),
+        }
+    }
+
+    fn fs_symlink_metadata(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.symlink_metadata")?;
+        let path = expect_string(&args[0])?;
+        let meta_tag = Some(TypeTag::Struct {
+            name: "fs::FsMetadata".to_string(),
+            params: Vec::new(),
+        });
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                let md = build_metadata_value(&meta);
+                wrap_ok(md, meta_tag)
+            }
+            Err(e) => io_err_to_result(e, meta_tag),
+        }
+    }
+
+    fn fs_current_dir(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 0, "fs.current_dir")?;
+        let tag = Some(TypeTag::Primitive(PrimitiveType::String));
+        match std::env::current_dir() {
+            Ok(p) => wrap_ok(Value::String(p.to_string_lossy().to_string()), tag),
+            Err(e) => io_err_to_result(e, tag),
+        }
+    }
+
+    fn fs_temp_dir(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 0, "fs.temp_dir")?;
+        let tmp = std::env::temp_dir();
+        Ok(Value::String(tmp.to_string_lossy().to_string()))
+    }
+
+    fn fs_temp_file(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 0, "fs.temp_file")?;
+        let tmp = std::env::temp_dir();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        for i in 0..32u128 {
+            let candidate = tmp.join(format!("afns_tmp_{}_{}", now, i));
+            if !candidate.exists() {
+                match std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&candidate)
+                {
+                    Ok(_) => {
+                        return wrap_ok(
+                            Value::String(candidate.to_string_lossy().to_string()),
+                            Some(TypeTag::Primitive(PrimitiveType::String)),
+                        )
+                    }
+                    Err(e) => {
+                        return io_err_to_result(e, Some(TypeTag::Primitive(PrimitiveType::String)))
+                    }
+                }
+            }
+        }
+        Err(RuntimeError::new(
+            "fs.temp_file: unable to create unique temp file",
+        ))
+    }
+
+    fn fs_copy_file(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "fs.copy_file")?;
+        let src = expect_string(&args[0])?;
+        let dst = expect_string(&args[1])?;
+        match std::fs::copy(&src, &dst) {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_copy(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        fs_copy_file(_interp, args)
+    }
+
+    fn fs_move(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "fs.move")?;
+        let src = expect_string(&args[0])?;
+        let dst = expect_string(&args[1])?;
+        match std::fs::rename(&src, &dst) {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => {
+                if is_cross_device(&e) {
+                    let meta = std::fs::metadata(&src);
+                    let copy_result = if meta.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
+                        copy_dir_recursive_impl(
+                            std::path::Path::new(&src),
+                            std::path::Path::new(&dst),
+                        )
+                        .and_then(|_| std::fs::remove_dir_all(&src))
+                    } else {
+                        std::fs::copy(&src, &dst).and_then(|_| std::fs::remove_file(&src))
+                    };
+                    return match copy_result {
+                        Ok(_) => wrap_ok(Value::Null, unit_tag()),
+                        Err(err) => io_err_to_result(err, unit_tag()),
+                    };
+                } else {
+                    return io_err_to_result(e, unit_tag());
+                }
+            }
+        }
+    }
+
+    fn fs_rename(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        fs_move(_interp, args)
+    }
+
+    fn fs_remove_file(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.remove_file")?;
+        let path = expect_string(&args[0])?;
+        match std::fs::remove_file(&path) {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_touch(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.touch")?;
+        let path = expect_string(&args[0])?;
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&path)
+            .map(|_| ())
+        {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_read_link(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.read_link")?;
+        let path = expect_string(&args[0])?;
+        match std::fs::read_link(&path) {
+            Ok(p) => wrap_ok(
+                Value::String(p.to_string_lossy().to_string()),
+                Some(TypeTag::Primitive(PrimitiveType::String)),
+            ),
+            Err(e) => io_err_to_result(e, Some(TypeTag::Primitive(PrimitiveType::String))),
+        }
+    }
+
+    fn fs_is_symlink(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.is_symlink")?;
+        let path = expect_string(&args[0])?;
+        match std::fs::symlink_metadata(&path) {
+            Ok(md) => Ok(Value::Bool(md.file_type().is_symlink())),
+            Err(_) => Ok(Value::Bool(false)),
+        }
+    }
+
+    fn fs_hard_link(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "fs.hard_link")?;
+        let src = expect_string(&args[0])?;
+        let dst = expect_string(&args[1])?;
+        match std::fs::hard_link(&src, &dst) {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_symlink_file(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "fs.symlink_file")?;
+        let src = expect_string(&args[0])?;
+        let dst = expect_string(&args[1])?;
+        #[cfg(unix)]
+        let result = std::os::unix::fs::symlink(&src, &dst);
+        #[cfg(windows)]
+        let result = std::os::windows::fs::symlink_file(&src, &dst);
+        match result {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_symlink_dir(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "fs.symlink_dir")?;
+        let src = expect_string(&args[0])?;
+        let dst = expect_string(&args[1])?;
+        #[cfg(unix)]
+        let result = std::os::unix::fs::symlink(&src, &dst);
+        #[cfg(windows)]
+        let result = std::os::windows::fs::symlink_dir(&src, &dst);
+        match result {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_set_readonly(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "fs.set_readonly")?;
+        let path = expect_string(&args[0])?;
+        let readonly = match &args[1] {
+            Value::Bool(b) => *b,
+            _ => return Err(RuntimeError::new("fs.set_readonly expects bool")),
+        };
+        match std::fs::metadata(&path).and_then(|mut md| {
+            let mut perms = md.permissions();
+            perms.set_readonly(readonly);
+            std::fs::set_permissions(&path, perms)
+        }) {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_chmod(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "fs.chmod")?;
+        let path = expect_string(&args[0])?;
+        let mode = expect_int(&args[1])?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(mode as u32);
+            match std::fs::set_permissions(&path, perms) {
+                Ok(_) => wrap_ok(Value::Null, unit_tag()),
+                Err(e) => io_err_to_result(e, unit_tag()),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // On non-unix, approximate readonly flag.
+            let readonly = mode & 0o200 == 0;
+            match std::fs::metadata(&path).and_then(|mut md| {
+                let mut perms = md.permissions();
+                perms.set_readonly(readonly);
+                std::fs::set_permissions(&path, perms)
+            }) {
+                Ok(_) => wrap_ok(Value::Null, unit_tag()),
+                Err(e) => io_err_to_result(e, unit_tag()),
+            }
+        }
+    }
+
+    fn fs_copy_permissions(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "fs.copy_permissions")?;
+        let src = expect_string(&args[0])?;
+        let dst = expect_string(&args[1])?;
+        match std::fs::metadata(&src).and_then(|m| {
+            let perms = m.permissions();
+            std::fs::set_permissions(&dst, perms)
+        }) {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_read_dir(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.read_dir")?;
+        let path = expect_string(&args[0])?;
+        let mut entries = Vec::new();
+        let dir_entry_tag = TypeTag::Struct {
+            name: "fs::DirEntry".to_string(),
+            params: Vec::new(),
+        };
+        let vec_tag = Some(TypeTag::Vec(Box::new(dir_entry_tag.clone())));
+        match std::fs::read_dir(&path) {
+            Ok(read_dir) => {
+                for entry in read_dir {
+                    match entry {
+                        Ok(e) => {
+                            let p = e.path();
+                            let meta = e.metadata().ok();
+                            let is_file = meta.as_ref().map(|m| m.is_file()).unwrap_or(false);
+                            let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+                            let mut fields = HashMap::new();
+                            fields.insert(
+                                "path".to_string(),
+                                Value::String(p.to_string_lossy().to_string()),
+                            );
+                            fields.insert(
+                                "file_name".to_string(),
+                                Value::String(
+                                    p.file_name()
+                                        .map(|s| s.to_string_lossy().to_string())
+                                        .unwrap_or_default(),
+                                ),
+                            );
+                            fields.insert("is_file".to_string(), Value::Bool(is_file));
+                            fields.insert("is_dir".to_string(), Value::Bool(is_dir));
+                            entries.push(Value::Struct(StructInstance {
+                                name: Some("fs::DirEntry".to_string()),
+                                type_params: Vec::new(),
+                                fields,
+                            }));
+                        }
+                        Err(e) => return io_err_to_result(e, vec_tag.clone()),
+                    }
+                }
+                wrap_ok(make_vec_value(entries, Some(dir_entry_tag)), vec_tag)
+            }
+            Err(e) => io_err_to_result(e, vec_tag),
+        }
+    }
+
+    fn fs_ensure_dir(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.ensure_dir")?;
+        let path = expect_string(&args[0])?;
+        match std::fs::create_dir_all(&path) {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_components(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.components")?;
+        let path = expect_string(&args[0])?;
+        let comps = std::path::Path::new(&path)
+            .components()
+            .map(|c| Value::String(c.as_os_str().to_string_lossy().to_string()))
+            .collect();
+        wrap_ok(
+            make_vec_value(comps, Some(TypeTag::Primitive(PrimitiveType::String))),
+            Some(TypeTag::Vec(Box::new(TypeTag::Primitive(
+                PrimitiveType::String,
+            )))),
+        )
+    }
+
+    fn fs_read_lines(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "fs.read_lines")?;
+        let path = expect_string(&args[0])?;
+        let elem_tag = TypeTag::Primitive(PrimitiveType::String);
+        let ok_tag = Some(TypeTag::Vec(Box::new(elem_tag.clone())));
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                let lines = content
+                    .lines()
+                    .map(|l| Value::String(l.trim_end_matches('\r').to_string()))
+                    .collect();
+                wrap_ok(make_vec_value(lines, Some(elem_tag)), ok_tag)
+            }
+            Err(e) => io_err_to_result(e, ok_tag),
+        }
+    }
+
+    fn fs_write_lines(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "fs.write_lines")?;
+        let path = expect_string(&args[0])?;
+        let vec_rc = expect_vec(&args[1])?;
+        let mut out = String::new();
+        for (idx, v) in vec_rc.borrow().iter().enumerate() {
+            let line = expect_string(v)?;
+            out.push_str(&line);
+            if idx + 1 != vec_rc.borrow().len() {
+                out.push('\n');
+            }
+        }
+        match std::fs::write(&path, out) {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn fs_copy_dir_recursive(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "fs.copy_dir_recursive")?;
+        let src = expect_string(&args[0])?;
+        let dst = expect_string(&args[1])?;
+
+        match copy_dir_recursive_impl(std::path::Path::new(&src), std::path::Path::new(&dst)) {
+            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+            Err(e) => io_err_to_result(e, unit_tag()),
+        }
+    }
+
+    fn build_metadata_value(meta: &std::fs::Metadata) -> Value {
+        let mut fields = HashMap::new();
+        fields.insert("is_file".to_string(), Value::Bool(meta.is_file()));
+        fields.insert("is_dir".to_string(), Value::Bool(meta.is_dir()));
+        fields.insert("size".to_string(), Value::Int(meta.len() as i64));
+        #[cfg(unix)]
+        let readonly = meta.permissions().readonly();
+        #[cfg(not(unix))]
+        let readonly = meta.permissions().readonly();
+        fields.insert("readonly".to_string(), Value::Bool(readonly));
+
+        fn ts(system_time: Option<std::time::SystemTime>) -> Value {
+            if let Some(t) = system_time {
+                match t.duration_since(std::time::UNIX_EPOCH) {
+                    Ok(d) => option_some_value(
+                        Value::Int(d.as_millis() as i64),
+                        Some(TypeTag::Primitive(PrimitiveType::Int)),
+                    ),
+                    Err(_) => option_none_value(Some(TypeTag::Primitive(PrimitiveType::Int))),
+                }
+            } else {
+                option_none_value(Some(TypeTag::Primitive(PrimitiveType::Int)))
+            }
+        }
+
+        fields.insert("created_at".to_string(), ts(meta.created().ok()));
+        fields.insert("modified_at".to_string(), ts(meta.modified().ok()));
+        fields.insert("accessed_at".to_string(), ts(meta.accessed().ok()));
+
+        Value::Struct(StructInstance {
+            name: Some("fs::FsMetadata".to_string()),
+            type_params: Vec::new(),
+            fields,
+        })
+    }
+
+    let mut map = HashMap::new();
+    map.insert(
+        "read_to_string".to_string(),
+        Value::Builtin(fs_read_to_string),
+    );
+    map.insert("read_bytes".to_string(), Value::Builtin(fs_read_bytes));
+    map.insert("write_string".to_string(), Value::Builtin(fs_write_string));
+    map.insert("write_bytes".to_string(), Value::Builtin(fs_write_bytes));
+    map.insert(
+        "append_string".to_string(),
+        Value::Builtin(fs_append_string),
+    );
+    map.insert("append_bytes".to_string(), Value::Builtin(fs_append_bytes));
+    map.insert("create_dir".to_string(), Value::Builtin(fs_create_dir));
+    map.insert(
+        "create_dir_all".to_string(),
+        Value::Builtin(fs_create_dir_all),
+    );
+    map.insert("remove_dir".to_string(), Value::Builtin(fs_remove_dir));
+    map.insert(
+        "remove_dir_all".to_string(),
+        Value::Builtin(fs_remove_dir_all),
+    );
+    map.insert("exists".to_string(), Value::Builtin(fs_exists));
+    map.insert("is_file".to_string(), Value::Builtin(fs_is_file));
+    map.insert("is_dir".to_string(), Value::Builtin(fs_is_dir));
+    map.insert("metadata".to_string(), Value::Builtin(fs_metadata));
+    map.insert("join".to_string(), Value::Builtin(fs_join));
+    map.insert("dirname".to_string(), Value::Builtin(fs_dirname));
+    map.insert("parent".to_string(), Value::Builtin(fs_parent));
+    map.insert("basename".to_string(), Value::Builtin(fs_basename));
+    map.insert("file_stem".to_string(), Value::Builtin(fs_file_stem));
+    map.insert("extension".to_string(), Value::Builtin(fs_extension));
+    map.insert("canonicalize".to_string(), Value::Builtin(fs_canonicalize));
+    map.insert("is_absolute".to_string(), Value::Builtin(fs_is_absolute));
+    map.insert("strip_prefix".to_string(), Value::Builtin(fs_strip_prefix));
+    map.insert(
+        "symlink_metadata".to_string(),
+        Value::Builtin(fs_symlink_metadata),
+    );
+    map.insert("current_dir".to_string(), Value::Builtin(fs_current_dir));
+    map.insert("temp_dir".to_string(), Value::Builtin(fs_temp_dir));
+    map.insert("temp_file".to_string(), Value::Builtin(fs_temp_file));
+    map.insert("copy_file".to_string(), Value::Builtin(fs_copy_file));
+    map.insert("copy".to_string(), Value::Builtin(fs_copy));
+    map.insert("move".to_string(), Value::Builtin(fs_move));
+    map.insert("rename".to_string(), Value::Builtin(fs_rename));
+    map.insert("remove_file".to_string(), Value::Builtin(fs_remove_file));
+    map.insert("touch".to_string(), Value::Builtin(fs_touch));
+    map.insert("read_link".to_string(), Value::Builtin(fs_read_link));
+    map.insert("is_symlink".to_string(), Value::Builtin(fs_is_symlink));
+    map.insert("hard_link".to_string(), Value::Builtin(fs_hard_link));
+    map.insert("symlink_file".to_string(), Value::Builtin(fs_symlink_file));
+    map.insert("symlink_dir".to_string(), Value::Builtin(fs_symlink_dir));
+    map.insert("set_readonly".to_string(), Value::Builtin(fs_set_readonly));
+    map.insert("chmod".to_string(), Value::Builtin(fs_chmod));
+    map.insert(
+        "copy_permissions".to_string(),
+        Value::Builtin(fs_copy_permissions),
+    );
+    map.insert("read_dir".to_string(), Value::Builtin(fs_read_dir));
+    map.insert("ensure_dir".to_string(), Value::Builtin(fs_ensure_dir));
+    map.insert("components".to_string(), Value::Builtin(fs_components));
+    map.insert("read_lines".to_string(), Value::Builtin(fs_read_lines));
+    map.insert("write_lines".to_string(), Value::Builtin(fs_write_lines));
+    map.insert(
+        "copy_dir_recursive".to_string(),
+        Value::Builtin(fs_copy_dir_recursive),
+    );
+
+    Value::Module(ModuleValue {
+        name: "fs".to_string(),
+        fields: map,
+    })
+}
+
+// ---------------------------
+// forge.net (sync std::net wrapper)
+// ---------------------------
+fn net_module() -> Value {
+    fn next_id(counter: &AtomicI64) -> i64 {
+        counter.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn sockets() -> &'static Mutex<HashMap<i64, TcpStream>> {
+        NET_SOCKETS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+    fn listeners() -> &'static Mutex<HashMap<i64, TcpListener>> {
+        NET_LISTENERS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+    fn udps() -> &'static Mutex<HashMap<i64, UdpSocket>> {
+        NET_UDP.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn wrap_ok(value: Value, ok_tag: Option<TypeTag>) -> RuntimeResult<Value> {
+        Ok(result_ok_value(
+            value,
+            ok_tag,
+            Some(TypeTag::Primitive(PrimitiveType::String)),
+        ))
+    }
+    fn wrap_err(msg: String, ok_tag: Option<TypeTag>) -> RuntimeResult<Value> {
+        Ok(result_err_value(
+            Value::String(msg),
+            ok_tag,
+            Some(TypeTag::Primitive(PrimitiveType::String)),
+        ))
+    }
+
+    fn socket_struct(id: i64) -> Value {
+        let mut fields = HashMap::new();
+        fields.insert("id".to_string(), Value::Int(id));
+        Value::Struct(StructInstance {
+            name: Some("net::Socket".to_string()),
+            type_params: Vec::new(),
+            fields,
+        })
+    }
+    fn listener_struct(id: i64) -> Value {
+        let mut fields = HashMap::new();
+        fields.insert("id".to_string(), Value::Int(id));
+        Value::Struct(StructInstance {
+            name: Some("net::Listener".to_string()),
+            type_params: Vec::new(),
+            fields,
+        })
+    }
+    fn udp_struct(id: i64) -> Value {
+        let mut fields = HashMap::new();
+        fields.insert("id".to_string(), Value::Int(id));
+        Value::Struct(StructInstance {
+            name: Some("net::UdpSocket".to_string()),
+            type_params: Vec::new(),
+            fields,
+        })
+    }
+
+    fn net_tcp_connect(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "net.tcp_connect")?;
+        let addr = expect_string(&args[0])?;
+        match TcpStream::connect(&addr) {
+            Ok(stream) => {
+                let id = next_id(&NEXT_NET_ID);
+                sockets().lock().unwrap().insert(id, stream);
+                wrap_ok(
+                    socket_struct(id),
+                    Some(TypeTag::Struct {
+                        name: "net::Socket".to_string(),
+                        params: Vec::new(),
+                    }),
+                )
+            }
+            Err(e) => wrap_err(
+                e.to_string(),
+                Some(TypeTag::Struct {
+                    name: "net::Socket".to_string(),
+                    params: Vec::new(),
+                }),
+            ),
+        }
+    }
+
+    fn net_tcp_listen(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "net.tcp_listen")?;
+        let addr = expect_string(&args[0])?;
+        match TcpListener::bind(&addr) {
+            Ok(lst) => {
+                lst.set_nonblocking(false).ok();
+                let id = next_id(&NEXT_NET_ID);
+                listeners().lock().unwrap().insert(id, lst);
+                wrap_ok(
+                    listener_struct(id),
+                    Some(TypeTag::Struct {
+                        name: "net::Listener".to_string(),
+                        params: Vec::new(),
+                    }),
+                )
+            }
+            Err(e) => wrap_err(
+                e.to_string(),
+                Some(TypeTag::Struct {
+                    name: "net::Listener".to_string(),
+                    params: Vec::new(),
+                }),
+            ),
+        }
+    }
+
+    fn net_tcp_accept(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "net.tcp_accept")?;
+        let listener_id = expect_handle(&args[0], "net::Listener")?;
+        let mut listeners = listeners().lock().unwrap();
+        let lst = listeners
+            .get_mut(&listener_id)
+            .ok_or_else(|| RuntimeError::new("invalid listener handle"))?;
+        match lst.accept() {
+            Ok((stream, _addr)) => {
+                let id = NEXT_NET_ID.fetch_add(1, Ordering::SeqCst);
+                sockets().lock().unwrap().insert(id, stream);
+                wrap_ok(
+                    socket_struct(id),
+                    Some(TypeTag::Struct {
+                        name: "net::Socket".to_string(),
+                        params: Vec::new(),
+                    }),
+                )
+            }
+            Err(e) => wrap_err(
+                e.to_string(),
+                Some(TypeTag::Struct {
+                    name: "net::Socket".to_string(),
+                    params: Vec::new(),
+                }),
+            ),
+        }
+    }
+
+    fn net_tcp_send(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "net.tcp_send")?;
+        let id = expect_handle(&args[0], "net::Socket")?;
+        let vec_rc = expect_vec(&args[1])?;
+        let data: Result<Vec<u8>, _> = vec_rc
+            .borrow()
+            .iter()
+            .map(|v| expect_int(v).map(|i| i as u8))
+            .collect();
+        let data = data.map_err(|e| RuntimeError::new(e.to_string()))?;
+        let mut sockets = sockets().lock().unwrap();
+        let sock = sockets
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("invalid socket handle"))?;
+        match sock.write_all(&data) {
+            Ok(_) => wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new()))),
+            Err(e) => wrap_err(e.to_string(), Some(TypeTag::Tuple(Vec::new()))),
+        }
+    }
+
+    fn net_tcp_recv(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "net.tcp_recv")?;
+        let id = expect_handle(&args[0], "net::Socket")?;
+        let len = expect_int(&args[1])? as usize;
+        let mut buf = vec![0u8; len];
+        let mut sockets = sockets().lock().unwrap();
+        let sock = sockets
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("invalid socket handle"))?;
+        match sock.read(&mut buf) {
+            Ok(read) => {
+                buf.truncate(read);
+                wrap_ok(
+                    make_vec_value(
+                        buf.into_iter().map(|b| Value::Int(b as i64)).collect(),
+                        Some(TypeTag::Primitive(PrimitiveType::UInt)),
+                    ),
+                    Some(TypeTag::Vec(Box::new(TypeTag::Primitive(
+                        PrimitiveType::UInt,
+                    )))),
+                )
+            }
+            Err(e) => wrap_err(
+                e.to_string(),
+                Some(TypeTag::Vec(Box::new(TypeTag::Primitive(
+                    PrimitiveType::UInt,
+                )))),
+            ),
+        }
+    }
+
+    fn net_close_socket(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "net.close_socket")?;
+        let id = expect_handle(&args[0], "net::Socket")?;
+        sockets().lock().unwrap().remove(&id);
+        Ok(Value::Null)
+    }
+
+    fn net_close_listener(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "net.close_listener")?;
+        let id = expect_handle(&args[0], "net::Listener")?;
+        listeners().lock().unwrap().remove(&id);
+        Ok(Value::Null)
+    }
+
+    fn net_udp_bind(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "net.udp_bind")?;
+        let addr = expect_string(&args[0])?;
+        match UdpSocket::bind(&addr) {
+            Ok(sock) => {
+                let id = NEXT_NET_ID.fetch_add(1, Ordering::SeqCst);
+                udps().lock().unwrap().insert(id, sock);
+                wrap_ok(
+                    udp_struct(id),
+                    Some(TypeTag::Struct {
+                        name: "net::UdpSocket".to_string(),
+                        params: Vec::new(),
+                    }),
+                )
+            }
+            Err(e) => wrap_err(
+                e.to_string(),
+                Some(TypeTag::Struct {
+                    name: "net::UdpSocket".to_string(),
+                    params: Vec::new(),
+                }),
+            ),
+        }
+    }
+
+    fn net_udp_send_to(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 3, "net.udp_send_to")?;
+        let id = expect_handle(&args[0], "net::UdpSocket")?;
+        let vec_rc = expect_vec(&args[1])?;
+        let addr = expect_string(&args[2])?;
+        let data: Result<Vec<u8>, _> = vec_rc
+            .borrow()
+            .iter()
+            .map(|v| expect_int(v).map(|i| i as u8))
+            .collect();
+        let data = data.map_err(|e| RuntimeError::new(e.to_string()))?;
+        let mut udps = udps().lock().unwrap();
+        let sock = udps
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("invalid udp handle"))?;
+        match sock.send_to(&data, &addr) {
+            Ok(sent) => wrap_ok(
+                Value::Int(sent as i64),
+                Some(TypeTag::Primitive(PrimitiveType::Int)),
+            ),
+            Err(e) => wrap_err(e.to_string(), Some(TypeTag::Primitive(PrimitiveType::Int))),
+        }
+    }
+
+    fn net_udp_recv_from(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "net.udp_recv_from")?;
+        let id = expect_handle(&args[0], "net::UdpSocket")?;
+        let len = expect_int(&args[1])? as usize;
+        let mut buf = vec![0u8; len];
+        let mut udps = udps().lock().unwrap();
+        let sock = udps
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("invalid udp handle"))?;
+        match sock.recv_from(&mut buf) {
+            Ok((read, from)) => {
+                buf.truncate(read);
+                let data_val = make_vec_value(
+                    buf.into_iter().map(|b| Value::Int(b as i64)).collect(),
+                    Some(TypeTag::Primitive(PrimitiveType::UInt)),
+                );
+                let mut fields = HashMap::new();
+                fields.insert("data".to_string(), data_val);
+                fields.insert("from".to_string(), Value::String(from.to_string()));
+                wrap_ok(
+                    Value::Struct(StructInstance {
+                        name: Some("net::UdpPacket".to_string()),
+                        type_params: Vec::new(),
+                        fields,
+                    }),
+                    Some(TypeTag::Struct {
+                        name: "net::UdpPacket".to_string(),
+                        params: Vec::new(),
+                    }),
+                )
+            }
+            Err(e) => wrap_err(
+                e.to_string(),
+                Some(TypeTag::Struct {
+                    name: "net::UdpPacket".to_string(),
+                    params: Vec::new(),
+                }),
+            ),
+        }
+    }
+
+    fn parse_timeout_arg(value: &Value, name: &str) -> RuntimeResult<Option<Duration>> {
+        match value {
+            Value::Null => Ok(None),
+            Value::Int(ms) => {
+                if *ms <= 0 {
+                    Ok(None)
+                } else {
+                    Ok(Some(Duration::from_millis(*ms as u64)))
+                }
+            }
+            Value::Option(option) => match option {
+                OptionValue::None { .. } => Ok(None),
+                OptionValue::Some { value, .. } => parse_timeout_arg(value, name),
+            },
+            _ => Err(RuntimeError::new(format!(
+                "{name} expects milliseconds (int) or null"
+            ))),
+        }
+    }
+
+    fn net_tcp_shutdown(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "net.tcp_shutdown")?;
+        let id = expect_handle(&args[0], "net::Socket")?;
+        let how = expect_string(&args[1])?;
+        let shutdown = match how.as_str() {
+            "read" => Shutdown::Read,
+            "write" => Shutdown::Write,
+            "both" => Shutdown::Both,
+            _ => {
+                return Err(RuntimeError::new(
+                    "net.tcp_shutdown expects \"read\", \"write\", or \"both\"",
+                ))
+            }
+        };
+        let mut sockets = sockets().lock().unwrap();
+        let sock = sockets
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("invalid socket handle"))?;
+        match sock.shutdown(shutdown) {
+            Ok(_) => wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new()))),
+            Err(e) => wrap_err(e.to_string(), Some(TypeTag::Tuple(Vec::new()))),
+        }
+    }
+
+    fn net_tcp_set_nodelay(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "net.tcp_set_nodelay")?;
+        let id = expect_handle(&args[0], "net::Socket")?;
+        let flag = match args[1] {
+            Value::Bool(b) => b,
+            _ => return Err(RuntimeError::new("net.tcp_set_nodelay expects bool flag")),
+        };
+        let mut sockets = sockets().lock().unwrap();
+        let sock = sockets
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("invalid socket handle"))?;
+        match sock.set_nodelay(flag) {
+            Ok(_) => wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new()))),
+            Err(e) => wrap_err(e.to_string(), Some(TypeTag::Tuple(Vec::new()))),
+        }
+    }
+
+    fn net_tcp_peer_addr(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "net.tcp_peer_addr")?;
+        let id = expect_handle(&args[0], "net::Socket")?;
+        let sockets = sockets().lock().unwrap();
+        let sock = sockets
+            .get(&id)
+            .ok_or_else(|| RuntimeError::new("invalid socket handle"))?;
+        match sock.peer_addr() {
+            Ok(addr) => wrap_ok(
+                Value::String(addr.to_string()),
+                Some(TypeTag::Primitive(PrimitiveType::String)),
+            ),
+            Err(e) => wrap_err(
+                e.to_string(),
+                Some(TypeTag::Primitive(PrimitiveType::String)),
+            ),
+        }
+    }
+
+    fn net_tcp_local_addr(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "net.tcp_local_addr")?;
+        let id = expect_handle(&args[0], "net::Socket")?;
+        let sockets = sockets().lock().unwrap();
+        let sock = sockets
+            .get(&id)
+            .ok_or_else(|| RuntimeError::new("invalid socket handle"))?;
+        match sock.local_addr() {
+            Ok(addr) => wrap_ok(
+                Value::String(addr.to_string()),
+                Some(TypeTag::Primitive(PrimitiveType::String)),
+            ),
+            Err(e) => wrap_err(
+                e.to_string(),
+                Some(TypeTag::Primitive(PrimitiveType::String)),
+            ),
+        }
+    }
+
+    fn net_tcp_set_read_timeout(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "net.tcp_set_read_timeout")?;
+        let id = expect_handle(&args[0], "net::Socket")?;
+        let timeout = parse_timeout_arg(&args[1], "net.tcp_set_read_timeout")?;
+        let mut sockets = sockets().lock().unwrap();
+        let sock = sockets
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("invalid socket handle"))?;
+        match sock.set_read_timeout(timeout) {
+            Ok(_) => wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new()))),
+            Err(e) => wrap_err(e.to_string(), Some(TypeTag::Tuple(Vec::new()))),
+        }
+    }
+
+    fn net_tcp_set_write_timeout(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "net.tcp_set_write_timeout")?;
+        let id = expect_handle(&args[0], "net::Socket")?;
+        let timeout = parse_timeout_arg(&args[1], "net.tcp_set_write_timeout")?;
+        let mut sockets = sockets().lock().unwrap();
+        let sock = sockets
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("invalid socket handle"))?;
+        match sock.set_write_timeout(timeout) {
+            Ok(_) => wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new()))),
+            Err(e) => wrap_err(e.to_string(), Some(TypeTag::Tuple(Vec::new()))),
+        }
+    }
+
+    fn net_udp_connect(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "net.udp_connect")?;
+        let id = expect_handle(&args[0], "net::UdpSocket")?;
+        let addr = expect_string(&args[1])?;
+        let mut udps = udps().lock().unwrap();
+        let sock = udps
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("invalid udp handle"))?;
+        match sock.connect(&addr) {
+            Ok(_) => wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new()))),
+            Err(e) => wrap_err(e.to_string(), Some(TypeTag::Tuple(Vec::new()))),
+        }
+    }
+
+    fn net_udp_send(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "net.udp_send")?;
+        let id = expect_handle(&args[0], "net::UdpSocket")?;
+        let vec_rc = expect_vec(&args[1])?;
+        let data: Result<Vec<u8>, _> = vec_rc
+            .borrow()
+            .iter()
+            .map(|v| expect_int(v).map(|i| i as u8))
+            .collect();
+        let data = data.map_err(|e| RuntimeError::new(e.to_string()))?;
+        let mut udps = udps().lock().unwrap();
+        let sock = udps
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("invalid udp handle"))?;
+        match sock.send(&data) {
+            Ok(sent) => wrap_ok(
+                Value::Int(sent as i64),
+                Some(TypeTag::Primitive(PrimitiveType::Int)),
+            ),
+            Err(e) => wrap_err(e.to_string(), Some(TypeTag::Primitive(PrimitiveType::Int))),
+        }
+    }
+
+    fn net_udp_recv(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "net.udp_recv")?;
+        let id = expect_handle(&args[0], "net::UdpSocket")?;
+        let len = expect_int(&args[1])? as usize;
+        let mut buf = vec![0u8; len];
+        let mut udps = udps().lock().unwrap();
+        let sock = udps
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("invalid udp handle"))?;
+        match sock.recv(&mut buf) {
+            Ok(read) => {
+                buf.truncate(read);
+                wrap_ok(
+                    make_vec_value(
+                        buf.into_iter().map(|b| Value::Int(b as i64)).collect(),
+                        Some(TypeTag::Primitive(PrimitiveType::UInt)),
+                    ),
+                    Some(TypeTag::Vec(Box::new(TypeTag::Primitive(
+                        PrimitiveType::UInt,
+                    )))),
+                )
+            }
+            Err(e) => wrap_err(
+                e.to_string(),
+                Some(TypeTag::Vec(Box::new(TypeTag::Primitive(
+                    PrimitiveType::UInt,
+                )))),
+            ),
+        }
+    }
+
+    fn net_udp_peer_addr(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "net.udp_peer_addr")?;
+        let id = expect_handle(&args[0], "net::UdpSocket")?;
+        let udps = udps().lock().unwrap();
+        let sock = udps
+            .get(&id)
+            .ok_or_else(|| RuntimeError::new("invalid udp handle"))?;
+        match sock.peer_addr() {
+            Ok(addr) => wrap_ok(
+                Value::String(addr.to_string()),
+                Some(TypeTag::Primitive(PrimitiveType::String)),
+            ),
+            Err(e) => wrap_err(
+                e.to_string(),
+                Some(TypeTag::Primitive(PrimitiveType::String)),
+            ),
+        }
+    }
+
+    fn net_udp_local_addr(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "net.udp_local_addr")?;
+        let id = expect_handle(&args[0], "net::UdpSocket")?;
+        let udps = udps().lock().unwrap();
+        let sock = udps
+            .get(&id)
+            .ok_or_else(|| RuntimeError::new("invalid udp handle"))?;
+        match sock.local_addr() {
+            Ok(addr) => wrap_ok(
+                Value::String(addr.to_string()),
+                Some(TypeTag::Primitive(PrimitiveType::String)),
+            ),
+            Err(e) => wrap_err(
+                e.to_string(),
+                Some(TypeTag::Primitive(PrimitiveType::String)),
+            ),
+        }
+    }
+
+    fn net_udp_set_broadcast(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "net.udp_set_broadcast")?;
+        let id = expect_handle(&args[0], "net::UdpSocket")?;
+        let flag = match args[1] {
+            Value::Bool(b) => b,
+            _ => return Err(RuntimeError::new("net.udp_set_broadcast expects bool flag")),
+        };
+        let mut udps = udps().lock().unwrap();
+        let sock = udps
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("invalid udp handle"))?;
+        match sock.set_broadcast(flag) {
+            Ok(_) => wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new()))),
+            Err(e) => wrap_err(e.to_string(), Some(TypeTag::Tuple(Vec::new()))),
+        }
+    }
+
+    fn net_udp_set_read_timeout(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "net.udp_set_read_timeout")?;
+        let id = expect_handle(&args[0], "net::UdpSocket")?;
+        let timeout = parse_timeout_arg(&args[1], "net.udp_set_read_timeout")?;
+        let mut udps = udps().lock().unwrap();
+        let sock = udps
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("invalid udp handle"))?;
+        match sock.set_read_timeout(timeout) {
+            Ok(_) => wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new()))),
+            Err(e) => wrap_err(e.to_string(), Some(TypeTag::Tuple(Vec::new()))),
+        }
+    }
+
+    fn net_udp_set_write_timeout(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "net.udp_set_write_timeout")?;
+        let id = expect_handle(&args[0], "net::UdpSocket")?;
+        let timeout = parse_timeout_arg(&args[1], "net.udp_set_write_timeout")?;
+        let mut udps = udps().lock().unwrap();
+        let sock = udps
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("invalid udp handle"))?;
+        match sock.set_write_timeout(timeout) {
+            Ok(_) => wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new()))),
+            Err(e) => wrap_err(e.to_string(), Some(TypeTag::Tuple(Vec::new()))),
+        }
+    }
+
+    let mut map = HashMap::new();
+    map.insert("tcp_connect".to_string(), Value::Builtin(net_tcp_connect));
+    map.insert("tcp_listen".to_string(), Value::Builtin(net_tcp_listen));
+    map.insert("tcp_accept".to_string(), Value::Builtin(net_tcp_accept));
+    map.insert("tcp_send".to_string(), Value::Builtin(net_tcp_send));
+    map.insert("tcp_recv".to_string(), Value::Builtin(net_tcp_recv));
+    map.insert("tcp_shutdown".to_string(), Value::Builtin(net_tcp_shutdown));
+    map.insert(
+        "tcp_set_nodelay".to_string(),
+        Value::Builtin(net_tcp_set_nodelay),
+    );
+    map.insert(
+        "tcp_set_read_timeout".to_string(),
+        Value::Builtin(net_tcp_set_read_timeout),
+    );
+    map.insert(
+        "tcp_set_write_timeout".to_string(),
+        Value::Builtin(net_tcp_set_write_timeout),
+    );
+    map.insert(
+        "tcp_peer_addr".to_string(),
+        Value::Builtin(net_tcp_peer_addr),
+    );
+    map.insert(
+        "tcp_local_addr".to_string(),
+        Value::Builtin(net_tcp_local_addr),
+    );
+    map.insert("close_socket".to_string(), Value::Builtin(net_close_socket));
+    map.insert(
+        "close_listener".to_string(),
+        Value::Builtin(net_close_listener),
+    );
+    map.insert("udp_bind".to_string(), Value::Builtin(net_udp_bind));
+    map.insert("udp_send_to".to_string(), Value::Builtin(net_udp_send_to));
+    map.insert(
+        "udp_recv_from".to_string(),
+        Value::Builtin(net_udp_recv_from),
+    );
+    map.insert("udp_connect".to_string(), Value::Builtin(net_udp_connect));
+    map.insert("udp_send".to_string(), Value::Builtin(net_udp_send));
+    map.insert("udp_recv".to_string(), Value::Builtin(net_udp_recv));
+    map.insert(
+        "udp_peer_addr".to_string(),
+        Value::Builtin(net_udp_peer_addr),
+    );
+    map.insert(
+        "udp_local_addr".to_string(),
+        Value::Builtin(net_udp_local_addr),
+    );
+    map.insert(
+        "udp_set_broadcast".to_string(),
+        Value::Builtin(net_udp_set_broadcast),
+    );
+    map.insert(
+        "udp_set_read_timeout".to_string(),
+        Value::Builtin(net_udp_set_read_timeout),
+    );
+    map.insert(
+        "udp_set_write_timeout".to_string(),
+        Value::Builtin(net_udp_set_write_timeout),
+    );
+
+    Value::Module(ModuleValue {
+        name: "net".to_string(),
+        fields: map,
+    })
 }
 
 fn builtin_math_sqrt(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
@@ -2634,7 +4169,9 @@ fn builtin_str_find(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<
             Value::Int(idx as i64),
             Some(TypeTag::Primitive(PrimitiveType::Int)),
         )),
-        None => Ok(option_none_value(Some(TypeTag::Primitive(PrimitiveType::Int)))),
+        None => Ok(option_none_value(Some(TypeTag::Primitive(
+            PrimitiveType::Int,
+        )))),
     }
 }
 
@@ -2689,7 +4226,10 @@ fn builtin_async_timeout(_interp: &mut Interpreter, args: &[Value]) -> RuntimeRe
     ensure_arity(args, 2, "async.timeout")?;
     let duration = expect_int(&args[0])?;
     let callback = args[1].clone();
-    Ok(make_future(FutureValue::new_timeout(duration as u64, callback)))
+    Ok(make_future(FutureValue::new_timeout(
+        duration as u64,
+        callback,
+    )))
 }
 
 fn builtin_async_spawn(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
@@ -2883,7 +4423,7 @@ fn builtin_vec_extend(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResul
     Ok(Value::Null)
 }
 
-fn ensure_arity(args: &[Value], expected: usize, name: &str) -> RuntimeResult<()> {
+pub(crate) fn ensure_arity(args: &[Value], expected: usize, name: &str) -> RuntimeResult<()> {
     if args.len() != expected {
         Err(RuntimeError::new(format!(
             "{name} expects {expected} argument(s), got {}",
@@ -2894,7 +4434,7 @@ fn ensure_arity(args: &[Value], expected: usize, name: &str) -> RuntimeResult<()
     }
 }
 
-fn make_vec_value(items: Vec<Value>, elem_type: Option<TypeTag>) -> Value {
+pub(crate) fn make_vec_value(items: Vec<Value>, elem_type: Option<TypeTag>) -> Value {
     Value::Vec(Rc::new(RefCell::new(VecValue { elem_type, items })))
 }
 
@@ -2902,7 +4442,7 @@ fn make_set_value(items: Vec<Value>, elem_type: Option<TypeTag>) -> Value {
     Value::Set(Rc::new(RefCell::new(SetValue { elem_type, items })))
 }
 
-fn make_map_value(
+pub(crate) fn make_map_value(
     entries: HashMap<String, Value>,
     key_type: Option<TypeTag>,
     value_type: Option<TypeTag>,
@@ -2914,7 +4454,7 @@ fn make_map_value(
     })))
 }
 
-fn option_some_value(mut value: Value, elem_type: Option<TypeTag>) -> Value {
+pub(crate) fn option_some_value(mut value: Value, elem_type: Option<TypeTag>) -> Value {
     if let Some(tag) = &elem_type {
         apply_type_tag_to_value(&mut value, tag);
     }
@@ -2924,11 +4464,11 @@ fn option_some_value(mut value: Value, elem_type: Option<TypeTag>) -> Value {
     })
 }
 
-fn option_none_value(elem_type: Option<TypeTag>) -> Value {
+pub(crate) fn option_none_value(elem_type: Option<TypeTag>) -> Value {
     Value::Option(OptionValue::None { elem_type })
 }
 
-fn result_ok_value(
+pub(crate) fn result_ok_value(
     mut value: Value,
     ok_type: Option<TypeTag>,
     err_type: Option<TypeTag>,
@@ -2943,7 +4483,7 @@ fn result_ok_value(
     })
 }
 
-fn result_err_value(
+pub(crate) fn result_err_value(
     mut value: Value,
     ok_type: Option<TypeTag>,
     err_type: Option<TypeTag>,
@@ -3016,7 +4556,7 @@ fn apply_type_tag_to_value(value: &mut Value, tag: &TypeTag) {
     }
 }
 
-fn expect_vec(value: &Value) -> RuntimeResult<Rc<RefCell<VecValue>>> {
+pub(crate) fn expect_vec(value: &Value) -> RuntimeResult<Rc<RefCell<VecValue>>> {
     if let Value::Vec(rc) = value {
         Ok(rc.clone())
     } else {
@@ -3024,7 +4564,7 @@ fn expect_vec(value: &Value) -> RuntimeResult<Rc<RefCell<VecValue>>> {
     }
 }
 
-fn expect_string(value: &Value) -> RuntimeResult<String> {
+pub(crate) fn expect_string(value: &Value) -> RuntimeResult<String> {
     if let Value::String(s) = value {
         Ok(s.clone())
     } else {
@@ -3032,12 +4572,21 @@ fn expect_string(value: &Value) -> RuntimeResult<String> {
     }
 }
 
-fn expect_int(value: &Value) -> RuntimeResult<i64> {
+pub(crate) fn expect_int(value: &Value) -> RuntimeResult<i64> {
     match value {
         Value::Int(i) => Ok(*i),
         Value::Float(f) => Ok(*f as i64),
         _ => Err(RuntimeError::new("Expected integer")),
     }
+}
+
+fn expect_handle(value: &Value, name: &str) -> RuntimeResult<i64> {
+    if let Value::Struct(inst) = value {
+        if let Some(idv) = inst.fields.get("id") {
+            return expect_int(idv);
+        }
+    }
+    Err(RuntimeError::new(format!("expected {} handle", name)))
 }
 
 fn expect_future(value: &Value) -> RuntimeResult<FutureHandle> {

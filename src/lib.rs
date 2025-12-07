@@ -1,18 +1,28 @@
-#![allow(dead_code, unused_imports, non_snake_case, non_camel_case_types, non_upper_case_globals)]
+#![allow(
+    warnings,
+    dead_code,
+    unused_imports,
+    unused_variables,
+    non_snake_case,
+    non_camel_case_types,
+    non_upper_case_globals,
+    unreachable_patterns,
+    private_interfaces
+)]
 // NightScript Library Entry Point
 // This file exposes the public API for the NightScript runtime,
 // especially for Android JNI integration
 
 pub mod ast;
+pub mod codegen;
 pub mod diagnostics;
 pub mod flutter;
+pub mod ir;
 pub mod lexer;
+pub mod lsp;
 pub mod module_loader;
 pub mod parser;
-pub mod ir;
-pub mod codegen;
 pub mod runtime;
-pub mod lsp;
 pub mod span;
 pub mod token;
 pub mod ui;

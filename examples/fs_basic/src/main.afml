@@ -1,0 +1,33 @@
+import forge;
+import forge.log as log;
+import forge.fs as fs;
+
+fun apex() {
+    let base:: str = "tmp/fs_basic_demo";
+    fs.ensure_dir(base)?;
+
+    let path:: str = fs.join(base, "hello.txt");
+    fs.write_string(path, "Hello from ApexForge!")?;
+    fs.append_string(path, "\nSecond line\n")?;
+
+    let content:: str = fs.read_to_string(path)?;
+    log.info("content:", content);
+
+    let meta:: fs::FsMetadata = fs.metadata(path)?;
+    log.info("size:", meta.size);
+    log.info("is_file:", meta.is_file);
+
+    let listing:: vec<fs::DirEntry> = fs.read_dir(base)?;
+    log.info("entries:", listing);
+
+    let copy_dir:: str = "tmp/fs_basic_demo_copy";
+    fs.copy_dir_recursive(base, copy_dir)?;
+
+    let moved:: str = fs.join(base, "hello-moved.txt");
+    fs.move(path, moved)?;
+
+    // Cleanup
+    fs.remove_file(moved)?;
+    fs.remove_dir_all(base)?;
+    fs.remove_dir_all(copy_dir)?;
+}

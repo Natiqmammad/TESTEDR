@@ -63,8 +63,8 @@ fn glfw_error_callback(error: glfw::Error, description: String) {
 }
 
 fn ui_run_afml_file(path: &str) -> Result<()> {
-    let source = fs::read_to_string(path)
-        .with_context(|| format!("failed to read source file {}", path))?;
+    let source =
+        fs::read_to_string(path).with_context(|| format!("failed to read source file {}", path))?;
     log_host!("ui_run_afml_file reading {path}");
     let tokens = lexer::lex(&source)?;
     let ast = parser::parse_tokens(&source, tokens)?;
@@ -146,7 +146,11 @@ impl HostContext {
                     self.pointer.mouse_down = true;
                     self.update_button_state_from_mouse();
                     self.send_pointer_event(FlutterPointerPhase::Down);
-                    ui_pointer_event(PointerPhase::Down, self.pointer.mouse_x, self.pointer.mouse_y);
+                    ui_pointer_event(
+                        PointerPhase::Down,
+                        self.pointer.mouse_x,
+                        self.pointer.mouse_y,
+                    );
                 }
                 WindowEvent::MouseButton(glfw::MouseButton::Button1, glfw::Action::Release, _) => {
                     self.pointer.mouse_down = false;
@@ -486,34 +490,31 @@ extern "C" {
         engine: *mut *mut FlutterEngine,
     ) -> FlutterEngineResult;
 
-pub fn FlutterEngineShutdown(engine: *mut FlutterEngine) -> FlutterEngineResult;
+    pub fn FlutterEngineShutdown(engine: *mut FlutterEngine) -> FlutterEngineResult;
 
-pub fn FlutterEngineSendWindowMetricsEvent(
-    engine: *mut FlutterEngine,
-    event: *const FlutterWindowMetricsEvent,
-) -> FlutterEngineResult;
+    pub fn FlutterEngineSendWindowMetricsEvent(
+        engine: *mut FlutterEngine,
+        event: *const FlutterWindowMetricsEvent,
+    ) -> FlutterEngineResult;
 
-pub fn FlutterEngineSendPointerEvent(
-    engine: *mut FlutterEngine,
-    events: *const FlutterPointerEvent,
-    events_count: usize,
-) -> FlutterEngineResult;
+    pub fn FlutterEngineSendPointerEvent(
+        engine: *mut FlutterEngine,
+        events: *const FlutterPointerEvent,
+        events_count: usize,
+    ) -> FlutterEngineResult;
 
-pub fn FlutterEngineScheduleFrame(engine: *mut FlutterEngine) -> FlutterEngineResult;
-pub fn FlutterEngineOnVsync(
-    engine: *mut FlutterEngine,
-    baton: isize,
-    frame_start_time_nanos: u64,
-    frame_target_time_nanos: u64,
-) -> FlutterEngineResult;
+    pub fn FlutterEngineScheduleFrame(engine: *mut FlutterEngine) -> FlutterEngineResult;
+    pub fn FlutterEngineOnVsync(
+        engine: *mut FlutterEngine,
+        baton: isize,
+        frame_start_time_nanos: u64,
+        frame_target_time_nanos: u64,
+    ) -> FlutterEngineResult;
 }
 
 static mut ENGINE_HANDLE: *mut FlutterEngine = ptr::null_mut();
 
-extern "C" fn on_platform_message(
-    _message: *const FlutterPlatformMessage,
-    _userdata: *mut c_void,
-) {
+extern "C" fn on_platform_message(_message: *const FlutterPlatformMessage, _userdata: *mut c_void) {
     log_host!("platform_message_callback");
 }
 
@@ -559,8 +560,16 @@ fn draw_button_gl(button: ButtonState) {
     }
 }
 
-fn draw_rects_gl(rects: &[nightscript_android::ui::runtime_bridge::DrawRect], viewport: (i32, i32)) {
-    log_host!("draw_rects_gl: {} rects (viewport {}x{})", rects.len(), viewport.0, viewport.1);
+fn draw_rects_gl(
+    rects: &[nightscript_android::ui::runtime_bridge::DrawRect],
+    viewport: (i32, i32),
+) {
+    log_host!(
+        "draw_rects_gl: {} rects (viewport {}x{})",
+        rects.len(),
+        viewport.0,
+        viewport.1
+    );
     unsafe {
         gl::Viewport(0, 0, viewport.0, viewport.1);
         gl::Disable(gl::SCISSOR_TEST);

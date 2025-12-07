@@ -710,13 +710,28 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_logical_or()?;
+        let mut expr = self.parse_range()?;
         if self.match_with(|k| matches!(k, TokenKind::Equals)) {
             let value = self.parse_assignment()?;
             let span = expr.span().merge(value.span());
             expr = Expr::Assignment {
                 target: Box::new(expr),
                 value: Box::new(value),
+                span,
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_range(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_logical_or()?;
+        while self.match_with(|k| matches!(k, TokenKind::DotDot)) {
+            let right = self.parse_logical_or()?;
+            let span = expr.span().merge(right.span());
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::Range,
+                right: Box::new(right),
                 span,
             };
         }
@@ -1072,6 +1087,11 @@ impl<'a> Parser<'a> {
                     value: false,
                     span: token.span,
                 }))
+            }
+            TokenKind::Keyword(Keyword::If) => {
+                let start = self.advance().span;
+                let if_stmt = self.parse_if(start)?;
+                Ok(Expr::If(Box::new(if_stmt)))
             }
             TokenKind::Keyword(Keyword::Fun) => self.parse_lambda(),
             TokenKind::Keyword(Keyword::Async) => {
@@ -1493,10 +1513,9 @@ impl<'a> Parser<'a> {
 
     fn struct_literal_follows(&self) -> bool {
         match (self.peek_kind_at(1), self.peek_kind_at(2)) {
-            (
-                Some(TokenKind::Identifier(_)),
-                Some(TokenKind::Colon | TokenKind::ColonColon),
-            ) => true,
+            (Some(TokenKind::Identifier(_)), Some(TokenKind::Colon | TokenKind::ColonColon)) => {
+                true
+            }
             (Some(TokenKind::RightBrace), _) => true,
             _ => false,
         }
@@ -1507,10 +1526,9 @@ impl<'a> Parser<'a> {
     }
 
     fn expect_type_separator(&mut self) -> Result<Token, ParseError> {
-        self.expect_with(
-            "'::'",
-            |k| matches!(k, TokenKind::Colon | TokenKind::ColonColon),
-        )
+        self.expect_with("'::'", |k| {
+            matches!(k, TokenKind::Colon | TokenKind::ColonColon)
+        })
     }
 
     fn is_at_end(&self) -> bool {

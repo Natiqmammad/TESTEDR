@@ -137,7 +137,9 @@ fn layout_node(
     cache: &mut LayoutCache,
 ) {
     cache.rects.insert(id, LayoutRect { x, y, w, h });
-    let Some(node) = tree.get(id) else { return; };
+    let Some(node) = tree.get(id) else {
+        return;
+    };
     match &node.kind {
         WidgetKind::Column => {
             let mut cy = y;
@@ -193,7 +195,12 @@ pub fn ui_get_snapshot_for_render() -> Option<UiSnapshot> {
     }
     if state.dirty {
         let tree = state.tree.as_ref().unwrap();
-        let layout = compute_layout(tree, tree.root(), state.window_w.max(1.0), state.window_h.max(1.0));
+        let layout = compute_layout(
+            tree,
+            tree.root(),
+            state.window_w.max(1.0),
+            state.window_h.max(1.0),
+        );
         state.layout_cache = layout.rects.clone();
         state.dirty = false;
     }
@@ -280,7 +287,9 @@ fn child_size(kind: &WidgetKind) -> (f32, f32) {
         WidgetKind::Button { .. } => (120.0, 40.0),
         WidgetKind::Text { text } => ((text.len() as f32 * 8.0).max(80.0), 20.0),
         WidgetKind::Spacer { size } => (*size, *size),
-        WidgetKind::Container { width, height, .. } => (width.unwrap_or(200.0), height.unwrap_or(200.0)),
+        WidgetKind::Container { width, height, .. } => {
+            (width.unwrap_or(200.0), height.unwrap_or(200.0))
+        }
         WidgetKind::Row | WidgetKind::Column | WidgetKind::Root => (120.0, 40.0),
     }
 }

@@ -108,6 +108,7 @@ impl ModuleLoader {
         let mut search_paths = Vec::new();
         search_paths.push(root.join("src"));
         search_paths.push(root.join("src").join("forge"));
+        add_vendor_paths(&mut search_paths, &root);
         Self {
             search_paths,
             cache_dir,
@@ -142,7 +143,8 @@ fn find_module_file(base: &Path, segments: &[&str]) -> Option<PathBuf> {
 fn module_cache_dir() -> Result<PathBuf> {
     let base = apex_home()?.join("cache").join("modules");
     if !base.exists() {
-        fs::create_dir_all(&base).with_context(|| format!("failed to create {}", base.display()))?;
+        fs::create_dir_all(&base)
+            .with_context(|| format!("failed to create {}", base.display()))?;
     }
     Ok(base)
 }
@@ -151,7 +153,8 @@ fn apex_home() -> Result<PathBuf> {
     let home = home_dir().ok_or_else(|| anyhow!("unable to determine home directory"))?;
     let root = home.join(".apex");
     if !root.exists() {
-        fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
+        fs::create_dir_all(&root)
+            .with_context(|| format!("failed to create {}", root.display()))?;
     }
     Ok(root)
 }
@@ -165,4 +168,30 @@ fn package_dir(name: &str, version: &str) -> Result<PathBuf> {
         "package `{name}` version `{version}` is not installed (expected {})",
         dir.display()
     ))
+}
+
+fn add_vendor_paths(search_paths: &mut Vec<PathBuf>, root: &Path) {
+    let vendor_root = root.join("target").join("vendor").join("afml");
+    if let Ok(entries) = fs::read_dir(&vendor_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                search_paths.push(path.clone());
+                search_paths.push(path.join("src"));
+            }
+        }
+    }
+    if let Ok(global_pkgs) = apex_home() {
+        let pkgs_root = global_pkgs.join("packages");
+        if let Ok(pkg_entries) = fs::read_dir(pkgs_root) {
+            for pkg in pkg_entries.flatten() {
+                if let Ok(ver_entries) = fs::read_dir(pkg.path()) {
+                    for ver in ver_entries.flatten() {
+                        let path = ver.path();
+                        search_paths.push(path.join("src"));
+                    }
+                }
+            }
+        }
+    }
 }

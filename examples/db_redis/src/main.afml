@@ -1,0 +1,17 @@
+import forge;
+import forge.log as log;
+import forge.db as db;
+
+fun apex() {
+    let conn:: db::Connection = db.open("redis", "redis://127.0.0.1:6379/")?;
+
+    db.set(conn, "afns:key", "hello redis")?;
+
+    let value:: option<str> = db.get(conn, "afns:key")?;
+    log.info("redis value:", value);
+
+    let removed:: i64 = db.del(conn, "afns:key")?;
+    log.info("deleted:", removed);
+
+    db.close(conn)?;
+}

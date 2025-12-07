@@ -297,6 +297,7 @@ pub enum Expr {
         span: Span,
     },
     Block(Block),
+    If(Box<IfStmt>),
     Try {
         expr: Box<Expr>,
         span: Span,
@@ -333,6 +334,7 @@ impl Expr {
             | Expr::Block(Block { span, .. })
             | Expr::Index { span, .. }
             | Expr::MethodCall { span, .. } => *span,
+            Expr::If(if_stmt) => if_stmt.span,
         }
     }
 
@@ -420,6 +422,7 @@ pub enum BinaryOp {
     Multiply,
     Divide,
     Modulo,
+    Range,
 }
 
 #[derive(Debug, Clone)]

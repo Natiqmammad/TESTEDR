@@ -1,0 +1,25 @@
+import forge;
+import forge.log as log;
+import forge.net as net;
+
+fun make_bytes(msg:: str) -> vec<u8> {
+    let out:: vec<u8> = vec.new();
+    for i in 0..str.len(msg) {
+        let ch:: str = msg[i];
+        vec.push(out, ch[0]);
+    }
+    return out;
+}
+
+fun apex() {
+    let sock:: net::UdpSocket = net.udp_bind("127.0.0.1:6105")?;
+    net.udp_set_broadcast(sock, false)?;
+
+    let data:: vec<u8> = make_bytes("hello udp");
+    net.udp_send_to(sock, data, "127.0.0.1:6105")?;
+
+    let packet:: net::UdpPacket = net.udp_recv_from(sock, 128)?;
+    log.info("from:", packet.from);
+    log.info("data bytes:", packet.data);
+    log.info("local addr:", net.udp_local_addr(sock)?);
+}

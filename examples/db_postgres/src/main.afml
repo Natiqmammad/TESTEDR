@@ -1,0 +1,19 @@
+import forge;
+import forge.log as log;
+import forge.db as db;
+
+fun apex() {
+    let url:: str = "postgres://postgres:password@localhost:5432/postgres";
+
+    let conn:: db::Connection = db.open("postgres", url)?;
+    db.exec(conn, "CREATE TABLE IF NOT EXISTS notes(id serial PRIMARY KEY, body text not null);")?;
+
+    db.begin(conn)?;
+    db.exec(conn, "INSERT INTO notes(body) VALUES ('pg-alpha'), ('pg-beta');")?;
+    db.commit(conn)?;
+
+    let rows = db.query(conn, "SELECT id, body FROM notes ORDER BY id DESC LIMIT 5;")?;
+    log.info("pg rows:", rows);
+
+    db.close(conn)?;
+}

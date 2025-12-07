@@ -1,0 +1,54 @@
+import forge;
+import forge.log as log;
+import forge.fs as fs;
+
+fun apex() {
+    let base:: str = "tmp/fs_adv";
+    fs.ensure_dir(base)?;
+
+    let src:: str = fs.join(base, "file.txt");
+    fs.write_string(src, "data")?;
+
+    // hard link
+    let hard:: str = fs.join(base, "file.hard");
+    fs.hard_link(src, hard)?;
+
+    // symlink
+    let sym:: str = fs.join(base, "file.symlink");
+    fs.symlink_file(src, sym)?;
+    let target:: str = fs.read_link(sym)?;
+    log.info("symlink->", target);
+    log.info("is_symlink:", fs.is_symlink(sym));
+
+    // touch + file_stem/parent
+    let touched:: str = fs.join(base, "touch.me");
+    fs.touch(touched)?;
+    log.info("file_stem:", fs.file_stem(touched));
+    log.info("parent:", fs.parent(touched));
+
+    // copy permissions from src to hard link
+    fs.copy_permissions(src, hard)?;
+
+    // chmod (best-effort on non-unix)
+    fs.chmod(src, 0o644)?;
+
+    // temp helpers
+    let cwd:: str = fs.current_dir()?;
+    let tmpd:: str = fs.temp_dir();
+    let tmpf:: str = fs.temp_file()?;
+    log.info("cwd:", cwd);
+    log.info("tmp dir:", tmpd);
+    log.info("tmp file:", tmpf);
+    fs.remove_file(tmpf)?;
+
+    // path components
+    let comps:: vec<str> = fs.components(sym)?;
+    log.info("components:", comps);
+
+    // clean
+    fs.remove_file(sym)?;
+    fs.remove_file(hard)?;
+    fs.remove_file(src)?;
+    fs.remove_file(touched)?;
+    fs.remove_dir_all(base)?;
+}

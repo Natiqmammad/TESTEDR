@@ -1,8 +1,8 @@
 use std::sync::{Mutex, OnceLock};
 
+use super::runtime_bridge::{ui_mark_dirty, ui_set_root_tree};
 use super::tree::{WidgetId, WidgetTree};
 use super::widget::{Color, EdgeInsets, Widget, WidgetKind};
-use super::runtime_bridge::{ui_set_root_tree, ui_mark_dirty};
 
 pub trait App {
     /// Build the root UI for this app.

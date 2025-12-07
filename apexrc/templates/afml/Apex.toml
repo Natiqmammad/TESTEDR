@@ -1,5 +1,13 @@
 [package]
 name = "{{name}}"
 version = "0.1.0"
+language = "afml"
+description = "{{name}} package"
+license = "MIT"
+authors = ["you <you@example.com>"]
+min_runtime = "1.0.0"
 
 [dependencies]
+
+[registry]
+url = "http://127.0.0.1:5665"

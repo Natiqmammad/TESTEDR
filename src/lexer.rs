@@ -47,7 +47,13 @@ impl<'a> Lexer<'a> {
                     '[' => self.simple_token(TokenKind::LeftBracket),
                     ']' => self.simple_token(TokenKind::RightBracket),
                     ',' => self.simple_token(TokenKind::Comma),
-                    '.' => self.simple_token(TokenKind::Dot),
+                    '.' => {
+                        if self.peek_second_char() == Some('.') {
+                            self.multi_char_token(2, TokenKind::DotDot)
+                        } else {
+                            self.simple_token(TokenKind::Dot)
+                        }
+                    }
                     ';' => self.simple_token(TokenKind::Semicolon),
                     ':' => {
                         if self.peek_second_char() == Some(':') {

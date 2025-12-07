@@ -48,7 +48,10 @@ impl Backend {
 
     async fn publish_diagnostics(&self, uri: &Url, text: &str) {
         let diagnostics = collect_diagnostics(text);
-        let _ = self.client.publish_diagnostics(uri.clone(), diagnostics, None).await;
+        let _ = self
+            .client
+            .publish_diagnostics(uri.clone(), diagnostics, None)
+            .await;
     }
 }
 
@@ -79,7 +82,10 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        let _ = self.client.log_message(MessageType::INFO, "Apex LSP ready").await;
+        let _ = self
+            .client
+            .log_message(MessageType::INFO, "Apex LSP ready")
+            .await;
     }
 
     async fn shutdown(&self) -> jsonrpc::Result<()> {
@@ -107,10 +113,7 @@ impl LanguageServer for Backend {
         let _ = self.client.publish_diagnostics(uri, Vec::new(), None).await;
     }
 
-    async fn completion(
-        &self,
-        _: CompletionParams,
-    ) -> jsonrpc::Result<Option<CompletionResponse>> {
+    async fn completion(&self, _: CompletionParams) -> jsonrpc::Result<Option<CompletionResponse>> {
         let mut items = Vec::new();
         for keyword in completion_keywords() {
             items.push(CompletionItem {
@@ -135,9 +138,14 @@ impl LanguageServer for Backend {
     async fn hover(&self, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
         let uri = params.text_document_position_params.text_document.uri;
         if let Some(text) = self.get_document(&uri).await {
-            if let Some((label, range)) = token_at_position(&text, params.text_document_position_params.position) {
+            if let Some((label, range)) =
+                token_at_position(&text, params.text_document_position_params.position)
+            {
                 let contents = HoverContents::Scalar(MarkedString::String(label));
-                return Ok(Some(Hover { contents, range: Some(range) }));
+                return Ok(Some(Hover {
+                    contents,
+                    range: Some(range),
+                }));
             }
         }
         Ok(None)
@@ -149,8 +157,13 @@ impl LanguageServer for Backend {
     ) -> jsonrpc::Result<Option<GotoDefinitionResponse>> {
         let uri = params.text_document_position_params.text_document.uri;
         if let Some(text) = self.get_document(&uri).await {
-            if let Some(range) = find_definition(&text, params.text_document_position_params.position) {
-                return Ok(Some(GotoDefinitionResponse::Scalar(Location { uri, range })));
+            if let Some(range) =
+                find_definition(&text, params.text_document_position_params.position)
+            {
+                return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                    uri,
+                    range,
+                })));
             }
         }
         Ok(None)
@@ -178,7 +191,7 @@ fn collect_diagnostics(source: &str) -> Vec<Diagnostic> {
     }
 }
 
-fn diagnostic_from_error(source: &str, error: &AfnsError) -> Diagnostic {
+fn diagnostic_from_error(_source: &str, error: &AfnsError) -> Diagnostic {
     let message = format!("{error}");
     let range = error
         .span()
@@ -216,8 +229,10 @@ fn token_at_position(text: &str, position: Position) -> Option<(String, Range)> 
 }
 
 fn position_in_range(pos: Position, range: Range) -> bool {
-    (pos.line > range.start.line || (pos.line == range.start.line && pos.character >= range.start.character))
-        && (pos.line < range.end.line || (pos.line == range.end.line && pos.character <= range.end.character))
+    (pos.line > range.start.line
+        || (pos.line == range.start.line && pos.character >= range.start.character))
+        && (pos.line < range.end.line
+            || (pos.line == range.end.line && pos.character <= range.end.character))
 }
 
 fn find_definition(text: &str, position: Position) -> Option<Range> {

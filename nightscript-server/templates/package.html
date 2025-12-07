@@ -1,0 +1,49 @@
+{% extends "layout.html" %}
+{% block title %}{{ package.name }} — ApexForge Registry{% endblock %}
+{% block content %}
+<article class="bg-white shadow rounded-lg p-6 mb-6">
+    <div class="flex justify-between items-start gap-4">
+        <div>
+            <h1 class="text-3xl font-semibold">{{ package.name }}</h1>
+            <p class="text-slate-500 text-sm">by <a class="hover:underline" href="/owner/{{ package.owner }}">{{ package.owner }}</a></p>
+        </div>
+        {% if package.latest_version.is_some() %}
+        <span class="text-sm bg-slate-100 rounded-full px-4 py-1">latest {{ package.latest_version.as_ref().unwrap() }}</span>
+        {% endif %}
+    </div>
+    {% if package.description.is_some() %}
+    <p class="mt-4 text-slate-600">{{ package.description.as_ref().unwrap() }}</p>
+    {% endif %}
+    <div class="mt-6 space-y-2 text-sm">
+        <p class="font-semibold">Install</p>
+        <code class="block bg-slate-100 rounded px-3 py-2 text-xs">{{ package.install_add }}</code>
+        <code class="block bg-slate-100 rounded px-3 py-2 text-xs">{{ package.install_install }}</code>
+    </div>
+</article>
+<section class="bg-white shadow rounded-lg p-6 mb-6">
+    <h2 class="text-xl font-semibold mb-4">README</h2>
+    {% match readme_html %}
+    {% when Some(body) %}
+    <div class="prose max-w-none">{{ body|safe }}</div>
+    {% when None %}
+    <p class="text-slate-500 text-sm">Package did not include a README.</p>
+    {% endmatch %}
+</section>
+<section class="bg-white shadow rounded-lg p-6">
+    <h2 class="text-xl font-semibold mb-4">Versions</h2>
+    <div class="divide-y">
+        {% for version in versions %}
+        <div class="py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+            <div>
+                <span class="font-mono text-indigo-700">{{ version.version }}</span>
+                <p class="text-xs text-slate-500">Published {{ version.created_at }}</p>
+            </div>
+            <div class="text-xs text-slate-500 break-all">
+                SHA256 {{ version.checksum }}
+            </div>
+            <a class="text-sm text-indigo-600 hover:underline" href="/api/v1/package/{{ package.name }}/{{ version.version }}/download">Download</a>
+        </div>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}

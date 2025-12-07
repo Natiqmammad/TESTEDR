@@ -1,0 +1,17 @@
+import forge;
+import forge.log as log;
+import forge.db as db;
+
+fun apex() {
+    let conn:: db::Connection = db.open("sqlite", "tmp/demo_db.sqlite3")?;
+
+    db.exec(conn, "CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, body TEXT);")?;
+    db.begin(conn)?;
+    db.exec(conn, "INSERT INTO notes(body) VALUES ('alpha'), ('beta');")?;
+    db.commit(conn)?;
+
+    let rows = db.query(conn, "SELECT id, body FROM notes ORDER BY id ASC;")?;
+    log.info("rows:", rows);
+
+    db.close(conn)?;
+}

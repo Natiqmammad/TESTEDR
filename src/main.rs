@@ -1,7 +1,9 @@
+#![allow(warnings)]
 mod ast;
 mod diagnostics;
 mod flutter;
 mod lexer;
+mod module_loader;
 mod parser;
 mod runtime;
 mod span;

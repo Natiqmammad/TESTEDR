@@ -1,0 +1,19 @@
+import forge;
+import forge.log as log;
+
+fun apex() {
+    let x:: i32 = 1;
+    let y:: i32 = 0;
+
+    if x == 1 {
+        y = 42;
+    } else {
+        y = 0;
+    }
+
+    if y == 42 {
+        log.info("done");
+    } else {
+        log.info("unexpected");
+    }
+}

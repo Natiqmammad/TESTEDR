@@ -1,9 +1,15 @@
 pub mod build;
 pub mod check;
 pub mod clean;
+pub mod deps;
 pub mod init;
 pub mod install;
+pub mod login;
 pub mod new;
+pub mod perf;
+pub mod publish;
+pub mod registry;
 pub mod run;
 pub mod single;
 pub mod uninstall;
+pub mod whoami;

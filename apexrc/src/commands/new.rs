@@ -17,7 +17,14 @@ pub fn create_project(path: &Path, explicit_name: Option<&str>) -> Result<()> {
         bail!("directory {} already exists", target_dir.display());
     }
     let name = project_name(explicit_name, &target_dir);
-    create_structure(&target_dir, &name, true)?;
+    create_structure(
+        &target_dir,
+        &name,
+        CreateOptions {
+            must_create_dir: true,
+            crate_mode: false,
+        },
+    )?;
     println!(
         "Created ApexForge project `{}` at {}",
         name,
@@ -26,8 +33,23 @@ pub fn create_project(path: &Path, explicit_name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-pub fn create_structure(dir: &Path, name: &str, must_create_dir: bool) -> Result<()> {
-    if must_create_dir || !dir.exists() {
+#[derive(Clone, Copy)]
+pub struct CreateOptions {
+    pub must_create_dir: bool,
+    pub crate_mode: bool,
+}
+
+impl Default for CreateOptions {
+    fn default() -> Self {
+        Self {
+            must_create_dir: false,
+            crate_mode: false,
+        }
+    }
+}
+
+pub fn create_structure(dir: &Path, name: &str, opts: CreateOptions) -> Result<()> {
+    if opts.must_create_dir || !dir.exists() {
         fs::create_dir_all(dir)
             .with_context(|| format!("failed to create directory {}", dir.display()))?;
     }
@@ -38,10 +60,11 @@ pub fn create_structure(dir: &Path, name: &str, must_create_dir: bool) -> Result
             src_dir.display()
         ));
     }
-    fs::create_dir_all(&src_dir).with_context(|| format!("failed to create {}", src_dir.display()))?;
+    fs::create_dir_all(&src_dir)
+        .with_context(|| format!("failed to create {}", src_dir.display()))?;
 
     let manifest = dir.join("Apex.toml");
-    if manifest.exists() && must_create_dir {
+    if manifest.exists() && opts.must_create_dir {
         return Err(anyhow!(
             "{} already exists",
             manifest.strip_prefix(dir).unwrap_or(&manifest).display()
@@ -49,7 +72,9 @@ pub fn create_structure(dir: &Path, name: &str, must_create_dir: bool) -> Result
     }
 
     write_file(&manifest, render_template(name))?;
-    write_file(&src_dir.join("main.afml"), default_main_source())?;
+    if !opts.crate_mode {
+        write_file(&src_dir.join("main.afml"), default_main_source())?;
+    }
     write_file(&src_dir.join("lib.afml"), default_lib_source())?;
     write_if_absent(&dir.join(".gitignore"), TEMPLATE_GITIGNORE)?;
     write_if_absent(&dir.join("README.md"), render_readme(name).as_str())?;
@@ -58,7 +83,8 @@ pub fn create_structure(dir: &Path, name: &str, must_create_dir: bool) -> Result
         .with_context(|| format!("failed to create {}", target_dir.display()))?;
     let gitkeep = target_dir.join(".gitkeep");
     if !gitkeep.exists() {
-        fs::write(&gitkeep, b"").with_context(|| format!("failed to write {}", gitkeep.display()))?;
+        fs::write(&gitkeep, b"")
+            .with_context(|| format!("failed to write {}", gitkeep.display()))?;
     }
     Ok(())
 }

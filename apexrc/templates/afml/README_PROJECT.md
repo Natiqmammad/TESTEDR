@@ -2,7 +2,7 @@
 
 This project was scaffolded with `apexrc`. Common commands:
 
-- `apexrc build` — verify sources and emit `target/debug/{{name}}.nexec`
+- `apexrc build` — verify sources and emit native ELF in `target/x86_64/debug/{{name}}`
 - `apexrc run` — build and execute `fun apex()`
 - `apexrc check` — fast syntax diagnostics
 - `apexrc clean` — delete local `target/` artifacts

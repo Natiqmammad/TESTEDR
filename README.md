@@ -78,6 +78,12 @@ examples/
   generics_basic/         ✅ Phase 2 (vec, option, result, identity<T>)
   generics_collections/   ✅ Phase 2 (map<str, vec<str>>, set, option)
   custom_generic_type/    ✅ Phase 2 (structs + generic helpers)
+  fs_basic/               ✅ Phase 5 (forge.fs primitives)
+  fs_advanced/            ✅ Phase 5 (forge.fs links/permissions)
+  net_udp_loopback/       ✅ Phase 5 (forge.net UDP demo)
+  db_sqlite/              ✅ Phase 5 (forge.db sqlite demo)
+  db_postgres/            ✅ Phase 5 (forge.db postgres demo)
+  db_redis/               ✅ Phase 5 (forge.db redis demo)
   ui/                     ✅ Phase 4 (Flutter-style layouts, stubs)
 ```
 
@@ -97,7 +103,17 @@ apexrc build
 apexrc run
 ```
 
-`apexrc build` emits a `.nexec` artifact under `target/debug/` and `apexrc run` immediately executes it with the built-in interpreter (no native binary rewrite required). Every scaffolded project ships with `fun apex()` as the entry point, and the `examples/` directory now contains full `apexrc` projects (`examples/minimal_hello`, `examples/generics_basic`, `examples/generics_collections`, `examples/custom_generic_type`) that follow the same workflow.
+`apexrc build` emits a native ELF under `target/x86_64/debug/` and `apexrc run` immediately executes it (native by default). Every scaffolded project ships with `fun apex()` as the entry point, and the `examples/` directory now contains full `apexrc` projects (`examples/minimal_hello`, `examples/generics_basic`, `examples/generics_collections`, `examples/custom_generic_type`, `examples/fs_basic`) that follow the same workflow.
+
+### Registry (local crates.io-style)
+
+```
+apexrc registry --addr 127.0.0.1:7878           # start local registry server
+APEXRC_REGISTRY=http://127.0.0.1:7878 apexrc publish   # publish current package
+apexrc install panic@0.1.0                      # install from registry (APEXRC_REGISTRY respected)
+```
+
+Packages are stored under `~/.apex/registry/<name>/<version>` on the server; clients fetch into `~/.apex/packages/…`.
 
 ---
 
@@ -1341,25 +1357,117 @@ env.vars()
 
 # ✅ **11. forge.fs — FILESYSTEM**
 
-Everything you expect + atomic ops.
+Synchronous, portable filesystem helpers (all fallible ops return `result<_, str>`).
 
 ```
-fs.exists(path)
-fs.is_file(path)
-fs.is_dir(path)
-fs.mkdir(path)
-fs.mkdir_all(path)
-fs.delete(path)
-fs.copy(src,dst)
-fs.move(src,dst)
-fs.read_file(path)
-fs.write_file(path)
-fs.append(path, data)
-fs.read_lines(path)
-fs.write_lines(path, vec)
-fs.temp_file()
-fs.temp_dir()
+fs.read_to_string(path)        -> result<str, str>
+fs.read_bytes(path)            -> result<vec<u8>, str>
+fs.write_string(path, data)    -> result<(), str>
+fs.write_bytes(path, vec<u8>)  -> result<(), str>
+fs.append_string(path, data)   -> result<(), str>
+fs.append_bytes(path, vec<u8>) -> result<(), str>
+
+fs.create_dir(path)            -> result<(), str>
+fs.create_dir_all(path)        -> result<(), str>
+fs.remove_dir(path)            -> result<(), str>
+fs.remove_dir_all(path)        -> result<(), str>
+
+fs.exists(path)                -> bool
+fs.is_file(path)               -> bool
+fs.is_dir(path)                -> bool
+fs.metadata(path)              -> result<fs::FsMetadata, str>
+fs.read_dir(path)              -> result<vec<fs::DirEntry>, str>
+
+fs.join(base, child)           -> str
+fs.dirname(path)               -> str
+fs.basename(path)              -> str
+fs.extension(path)             -> option<str>
+fs.canonicalize(path)          -> result<str, str>
+fs.is_absolute(path)           -> bool
+fs.strip_prefix(base, path)    -> result<str, str>
+
+fs.copy_file(src, dst)         -> result<(), str>
+fs.copy(src, dst)              -> result<(), str>  // alias
+fs.copy_dir_recursive(src,dst) -> result<(), str>
+fs.move(src, dst)              -> result<(), str>
+fs.rename(src, dst)            -> result<(), str>  // alias
+fs.remove_file(path)           -> result<(), str>
+fs.ensure_dir(path)            -> result<(), str>
+fs.read_lines(path)            -> result<vec<str>, str>
+fs.write_lines(path, vec<str>) -> result<(), str>
+fs.read_link(path)             -> result<str, str>
+fs.is_symlink(path)            -> bool
+fs.hard_link(src, dst)         -> result<(), str>
+fs.symlink_file(src, dst)      -> result<(), str>
+fs.symlink_dir(src, dst)       -> result<(), str>
+fs.chmod(path, mode)           -> result<(), str> (unix modes; best-effort on Windows)
+fs.symlink_metadata(path)      -> result<fs::FsMetadata, str>
+fs.components(path)            -> result<vec<str>, str>
+fs.parent(path)                -> option<str>
+fs.file_stem(path)             -> option<str>
+fs.touch(path)                 -> result<(), str>
+fs.copy_permissions(src,dst)   -> result<(), str>
+fs.current_dir()               -> result<str, str>
+fs.temp_dir()                  -> str
+fs.temp_file()                 -> result<str, str>
 ```
+
+### forge.net (sync std::net)
+`tcp_connect`, `tcp_listen`, `tcp_accept`, `tcp_send`, `tcp_recv`, `tcp_shutdown`, `tcp_set_nodelay`, `tcp_set_read_timeout`, `tcp_set_write_timeout`, `tcp_peer_addr`, `tcp_local_addr`, `udp_bind`, `udp_connect`, `udp_send`, `udp_send_to`, `udp_recv`, `udp_recv_from`, `udp_set_broadcast`, `udp_set_read_timeout`, `udp_set_write_timeout`, `udp_peer_addr`, `udp_local_addr`, `close_socket`, `close_listener`. Types: `net::Socket`, `net::Listener`, `net::UdpSocket`, `net::UdpPacket { data, from }`.
+
+### forge.db (sqlite + postgres + redis)
+- `db.open(kind:: str, target:: str) -> result<db::Connection, str>`
+  - `kind = "sqlite"` → `target = "path/to.db"` or `sqlite:path`
+  - `kind = "postgres"` → `target = "postgres://user:pass@host:port/db"`
+  - `kind = "redis"` → `target = "redis://host:port/db"`
+- SQL operations (`sqlite`, `postgres`):
+  - `db.exec(conn, sql) -> result<db::ExecResult, str>` (`rows_affected`)
+  - `db.query(conn, sql) -> result<vec<map<str, Value>>, str>`
+  - `db.begin(conn)`, `db.commit(conn)`, `db.rollback(conn)` → `result<(), str>`
+- Key-value operations (`redis`):
+  - `db.set(conn, key, value) -> result<(), str>`
+  - `db.get(conn, key) -> result<option<str>, str>`
+  - `db.del(conn, key) -> result<i64, str>`
+- `db.close(conn) -> result<(), str>`
+
+Structured types exposed to AFNS:
+
+- `fs::FsMetadata { is_file, is_dir, size, readonly, created_at?, modified_at?, accessed_at? }`
+- `fs::DirEntry { path, file_name, is_file, is_dir }`
+- `db::Connection { id }`
+- `db::ExecResult { rows_affected }`
+
+---
+
+## ✅ **Registry & Packages (Phase 1)**
+
+- **Server**: `cargo run --manifest-path nightscript-server/Cargo.toml` starts the local registry on `127.0.0.1:5665`.
+- **Auth flow**:
+  - `curl -X POST /api/v1/register` to create a user.
+  - `apexrc login --registry http://127.0.0.1:5665` (stdin prompts username/password).
+  - `apexrc whoami` shows the authenticated user + registry URL.
+- **Publishing AFML libraries**:
+  - `apexrc init --crates` scaffolds `Apex.toml` with `[registry]`.
+  - `apexrc publish` packages `Apex.toml`, `README.md`, `src/**` into `.apkg`, computes SHA-256, and uploads via `/api/v1/packages/publish`.
+- **Consuming packages**:
+  - `apexrc add hello-afml` records a semver constraint.
+  - `apexrc install` resolves highest compatible versions, verifies checksums, caches under `~/.apex/pkgs/<name>/<version>`, and vendors into `./target/vendor/afml/<name>@<version>/`.
+  - `apexrc update` refreshes dependencies to the latest allowed versions; `apexrc install --locked` uses `Apex.lock` verbatim.
+  - Builds/runs automatically call `apexrc install --locked` to ensure the vendor tree matches the lockfile.
+- **Diagnostics**: `scripts/phase1_e2e.sh` runs an end-to-end test (server → publish → add/install → build/run) and asserts that the application prints the library output.
+
+See `examples/registry_demo/README.md` for a hands-on walkthrough.
+
+### Registry UI & HTML pages
+
+- `cargo run --manifest-path nightscript-server/Cargo.toml` serves both the JSON API and a Tailwind-powered HTML UI at `http://127.0.0.1:5665`.
+- Landing page (`/`) highlights quick links plus a search box; `/packages` lists packages with pagination, search, and sort (`?search=net&sort=name`).
+- `/package/<name>` renders README.md straight from the uploaded tarball and shows install commands, version history, checksums, and download links.
+- `/owner/<handle>` shows a profile-like list of packages owned by a user; `/login` exposes a dev-only token helper form.
+- Every HTML page sets `Last-Modified`/`ETag`, and JSON equivalents remain at `/api/v1/*` for automation.
+- Screenshot (current Tailwind layout):
+
+  ![ApexForge Registry UI](assets/branding/apexforge_logo.png)
 
 ---
 
