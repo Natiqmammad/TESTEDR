@@ -34,9 +34,11 @@ pub fn publish_project(ctx: &ProjectContext, registry: Option<&str>) -> Result<(
     let archive = create_archive(&ctx.root)?;
     let checksum = encode(Sha256::digest(&archive));
     let manifest_raw = std::fs::read_to_string(&ctx.config_path)?;
+    let manifest_json = serde_json::to_string(&ctx.config)?;
 
     let form = multipart::Form::new()
         .part("manifest", multipart::Part::text(manifest_raw))
+        .part("manifest_json", multipart::Part::text(manifest_json))
         .part(
             "tarball",
             multipart::Part::bytes(archive.clone())

@@ -2,17 +2,32 @@ use std::time::Instant;
 
 use anyhow::Result;
 
-use crate::{commands::build::format_duration, commands::deps, ProjectContext};
+use crate::{
+    commands::{
+        build::format_duration,
+        deps::{self, ResolveMode},
+    },
+    ProjectContext,
+};
 
-pub fn install(ctx: &ProjectContext, locked: bool) -> Result<()> {
+pub fn install(ctx: &ProjectContext, locked: bool, quiet: bool) -> Result<()> {
     let started = Instant::now();
-    let resolved = deps::install_all(ctx, locked)?;
+    let mode = if locked {
+        ResolveMode::Locked
+    } else {
+        ResolveMode::Solve { update: None }
+    };
+    let graph = deps::ensure_dependencies(ctx, mode)?;
+    deps::vendor_from_graph(ctx, &graph, quiet)?;
     if !locked {
-        if resolved.is_empty() {
+        if graph.nodes.is_empty() {
             println!("No dependencies to install");
         } else {
-            for dep in resolved {
-                println!("Resolved {} @ {} ({})", dep.name, dep.version, dep.checksum);
+            for node in graph.sorted() {
+                println!(
+                    "Resolved {} @ {} ({})",
+                    node.name, node.version, node.checksum
+                );
             }
         }
     }

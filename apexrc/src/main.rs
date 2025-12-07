@@ -10,11 +10,12 @@ mod commands;
 mod config;
 mod lockfile;
 mod package_archive;
+mod resolver;
 mod user_config;
 
 use commands::{
-    build, check, clean, init, install, login as login_cmd, new, perf, run, single, uninstall,
-    whoami as whoami_cmd,
+    build, check, clean, deps, init, install, login as login_cmd, new, perf, run, single,
+    uninstall, whoami as whoami_cmd,
 };
 use config::ApexConfig;
 
@@ -45,6 +46,8 @@ struct Cli {
     /// Compile a standalone .afml source file
     #[arg(value_name = "SOURCE")]
     source: Option<PathBuf>,
+    #[arg(long)]
+    quiet: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -56,6 +59,12 @@ enum Command {
         name: String,
         #[arg(long, value_name = "DIR")]
         dir: Option<PathBuf>,
+    },
+    /// Explain why a dependency was selected
+    Why {
+        package: String,
+        #[arg(long, value_name = "DIR")]
+        manifest_path: Option<PathBuf>,
     },
     /// Initialize Apex.toml in the current (or provided) directory
     Init {
@@ -112,6 +121,18 @@ enum Command {
     },
     /// Update dependencies to the latest allowed versions
     Update {
+        #[arg(value_name = "PACKAGE")]
+        packages: Vec<String>,
+        #[arg(long, value_name = "DIR")]
+        manifest_path: Option<PathBuf>,
+    },
+    /// Show which dependencies have newer compatible versions
+    Outdated {
+        #[arg(long, value_name = "DIR")]
+        manifest_path: Option<PathBuf>,
+    },
+    /// Print the dependency tree from the lockfile
+    Tree {
         #[arg(long, value_name = "DIR")]
         manifest_path: Option<PathBuf>,
     },
@@ -171,6 +192,7 @@ fn main() -> Result<()> {
             "cannot specify both a source file and a subcommand"
         ));
     }
+    let quiet = cli.quiet;
     if let Some(source) = &cli.source {
         single::compile_single_file(source)?;
         return Ok(());
@@ -195,7 +217,7 @@ fn main() -> Result<()> {
             dump_ir,
         }) => {
             let mut ctx = ProjectContext::load(manifest_path)?;
-            install::install(&ctx, true)?;
+            install::install(&ctx, true, quiet)?;
             let target = build::BuildTarget::from(target);
             let profile = if release {
                 build::BuildProfile::Release
@@ -211,7 +233,7 @@ fn main() -> Result<()> {
             dump_ir,
         }) => {
             let mut ctx = ProjectContext::load(manifest_path)?;
-            install::install(&ctx, true)?;
+            install::install(&ctx, true, quiet)?;
             let target = build::BuildTarget::from(target);
             let profile = if release {
                 build::BuildProfile::Release
@@ -237,7 +259,7 @@ fn main() -> Result<()> {
             let (pkg, ver) = split_dep_input(&package, version.as_deref().unwrap_or("*"));
             ctx.config.add_dependency(pkg.clone(), ver.clone())?;
             ctx.config.save()?;
-            install::install(&ctx, false)?;
+            install::install(&ctx, false, quiet)?;
             println!("Added dependency `{pkg}` = \"{ver}\"");
         }
         Some(Command::Remove {
@@ -247,13 +269,26 @@ fn main() -> Result<()> {
             let mut ctx = ProjectContext::load(manifest_path)?;
             ctx.config.remove_dependency(&package)?;
             ctx.config.save()?;
-            clean_vendor(&ctx.root, &package)?;
-            install::install(&ctx, false)?;
+            install::install(&ctx, false, quiet)?;
             println!("Removed dependency `{package}`");
         }
-        Some(Command::Update { manifest_path }) => {
+        Some(Command::Update {
+            packages,
+            manifest_path,
+        }) => {
             let ctx = ProjectContext::load(manifest_path)?;
-            install::install(&ctx, false)?;
+            let update_slice = if packages.is_empty() {
+                None
+            } else {
+                Some(packages.as_slice())
+            };
+            let graph = deps::ensure_dependencies(
+                &ctx,
+                deps::ResolveMode::Solve {
+                    update: update_slice,
+                },
+            )?;
+            deps::vendor_from_graph(&ctx, &graph, quiet)?;
             println!("Updated dependencies for {}", ctx.config.package.name);
         }
         Some(Command::Install {
@@ -261,7 +296,7 @@ fn main() -> Result<()> {
             locked,
         }) => {
             let ctx = ProjectContext::load(manifest_path)?;
-            install::install(&ctx, locked)?;
+            install::install(&ctx, locked, quiet)?;
         }
         Some(Command::Uninstall { package, version }) => {
             let (pkg, ver) = split_dep_input_optional(&package, version.as_deref());
@@ -283,7 +318,7 @@ fn main() -> Result<()> {
             release,
         }) => {
             let mut ctx = ProjectContext::load(manifest_path)?;
-            install::install(&ctx, true)?;
+            install::install(&ctx, true, quiet)?;
             let target = build::BuildTarget::from(target);
             let profile = if release {
                 build::BuildProfile::Release
@@ -297,6 +332,32 @@ fn main() -> Result<()> {
         }
         Some(Command::Whoami { registry }) => {
             whoami_cmd::whoami(registry.as_deref())?;
+        }
+        Some(Command::Outdated { manifest_path }) => {
+            let ctx = ProjectContext::load(manifest_path)?;
+            let entries = deps::outdated(&ctx)?;
+            if entries.is_empty() {
+                println!("All dependencies are up to date");
+            } else {
+                for entry in entries {
+                    match entry.current {
+                        Some(current) => println!("{} {} -> {}", entry.name, current, entry.latest),
+                        None => println!("{} (unlocked) -> {}", entry.name, entry.latest),
+                    }
+                }
+            }
+        }
+        Some(Command::Tree { manifest_path }) => {
+            let ctx = ProjectContext::load(manifest_path)?;
+            deps::print_tree(&ctx)?;
+        }
+        Some(Command::Why {
+            package,
+            manifest_path,
+        }) => {
+            let ctx = ProjectContext::load(manifest_path)?;
+            let report = deps::explain_dependency(&ctx, &package)?;
+            println!("{}", deps::format_why(&report));
         }
         None => return Err(anyhow!("no command provided")),
     }
@@ -345,22 +406,6 @@ fn split_dep_input_optional(package: &str, fallback: Option<&str>) -> (String, O
     } else {
         (package.to_string(), fallback.map(|s| s.to_string()))
     }
-}
-
-fn clean_vendor(root: &PathBuf, package: &str) -> Result<()> {
-    let vendor_root = root.join("target").join("vendor").join("afml");
-    if !vendor_root.exists() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(&vendor_root)? {
-        let entry = entry?;
-        if let Some(name) = entry.file_name().to_str() {
-            if name.starts_with(&format!("{package}@")) {
-                fs::remove_dir_all(entry.path())?;
-            }
-        }
-    }
-    Ok(())
 }
 
 fn print_logo_banner() {

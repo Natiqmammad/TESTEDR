@@ -58,8 +58,6 @@ cat >"$APP_DIR/Apex.toml" <<'TOML'
 name = "registry-app"
 version = "0.1.0"
 language = "afml"
-[dependencies]
-hello-afml = "^0.1.0"
 [registry]
 url = "http://127.0.0.1:5665"
 TOML
@@ -73,9 +71,15 @@ fun apex() {
 AFML
 
 echo "[phase1] installing deps..."
+(cd "$APP_DIR" && apexrc add hello-afml@^0.1.0)
 (cd "$APP_DIR" && apexrc install)
+(cd "$APP_DIR" && apexrc tree)
+(cd "$APP_DIR" && apexrc why hello-afml | tee "$tmpdir/why.txt")
+grep -q "hello-afml" "$tmpdir/why.txt"
+(cd "$APP_DIR" && apexrc install --locked)
 
 echo "[phase1] building and running..."
+(cd "$APP_DIR" && apexrc build)
 output="$(cd "$APP_DIR" && apexrc run)"
 echo "$output"
 grep -q "hi from registry" <<<"$output"

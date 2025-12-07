@@ -1,13 +1,13 @@
 {% extends "layout.html" %}
 {% block title %}{{ owner_name }} — ApexForge Registry{% endblock %}
 {% block content %}
-<section class="bg-white shadow rounded-lg p-6 mb-6">
+<section class="panel p-6 mb-6">
     <h1 class="text-3xl font-semibold mb-2">{{ owner_name }}</h1>
     <p class="text-slate-500">Package owner</p>
 </section>
 <section class="space-y-4">
     {% for pkg in packages %}
-    <article class="bg-white shadow rounded-lg p-5">
+    <article class="panel p-5">
         <div class="flex justify-between items-start">
             <div>
                 <h2 class="text-lg font-semibold"><a class="text-indigo-700 hover:underline" href="/package/{{ pkg.name }}">{{ pkg.name }}</a></h2>

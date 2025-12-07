@@ -4,13 +4,14 @@ use axum::{
     extract::{Form, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::Response,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use axum_extra::extract::Multipart;
 use flate2::read::GzDecoder;
 use pulldown_cmark::{html, Options, Parser};
 use semver::Version;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool, Transaction};
@@ -25,7 +26,8 @@ use crate::{
     error::AppError,
     models::{
         now_string, AuthResponse, LoginRequest, Manifest, PackageDetail, PackageRow,
-        PackageSummary, PackageVersion, PublishResponse, RegisterRequest, UserResponse, VersionRow,
+        PackageSummary, PackageVersion, PublishResponse, RegisterRequest, TargetsSection,
+        UserResponse, VersionRow,
     },
     storage::Storage,
     templates::{
@@ -49,8 +51,11 @@ pub struct AppState {
 #[derive(Default, serde::Deserialize)]
 pub struct PackagesQuery {
     pub search: Option<String>,
+    #[serde(rename = "q")]
+    pub q: Option<String>,
     pub sort: Option<String>,
     pub page: Option<usize>,
+    pub per_page: Option<usize>,
 }
 
 #[derive(serde::Deserialize)]
@@ -88,8 +93,37 @@ struct PackageVersionRow {
     version: String,
     checksum: String,
     created_at: String,
+    yanked: i64,
+    targets_json: Option<String>,
     #[sqlx(rename = "path?")]
     path: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PackageVersionsResponse {
+    name: String,
+    versions: Vec<PackageVersionDescriptor>,
+}
+
+#[derive(Serialize)]
+struct PackageVersionDescriptor {
+    version: String,
+    checksum: String,
+    created_at: String,
+    yanked: bool,
+    dependencies: std::collections::BTreeMap<String, String>,
+    targets: TargetsSection,
+}
+
+#[derive(Serialize)]
+struct OwnerListResponse {
+    package: String,
+    owners: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct OwnerRequest {
+    username: String,
 }
 
 impl HtmlPage {
@@ -151,10 +185,30 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/me", get(me))
         .route("/api/v1/packages", get(list_packages))
         .route("/api/v1/package/:name", get(get_package))
+        .route(
+            "/api/v1/package/:name/versions",
+            get(list_versions),
+        )
         .route("/api/package/:name", get(get_package))
         .route(
             "/api/v1/package/:name/:version/download",
             get(download_package),
+        )
+        .route(
+            "/api/v1/package/:name/:version/yank",
+            post(yank_version),
+        )
+        .route(
+            "/api/v1/package/:name/:version/unyank",
+            post(unyank_version),
+        )
+        .route(
+            "/api/v1/package/:name/owners",
+            get(list_owners).post(add_owner),
+        )
+        .route(
+            "/api/v1/package/:name/owners/:owner",
+            delete(remove_owner),
         )
         .route("/api/v1/packages/publish", post(publish))
         .with_state(state)
@@ -198,7 +252,7 @@ async fn render_package_detail(
 ) -> Result<HtmlPage, AppError> {
     let pkg = sqlx::query_as::<_, crate::models::PackageRow>(
         r#"
-        SELECT p.id, p.name, p.description, p.owner_id, u.username as owner_name
+        SELECT p.id, p.name, p.description, p.metadata_json, p.owner_id, u.username as owner_name
         FROM packages p
         JOIN users u ON p.owner_id = u.id
         WHERE p.name = ?
@@ -211,7 +265,7 @@ async fn render_package_detail(
 
     let version_rows = sqlx::query_as::<_, PackageVersionRow>(
         r#"
-        SELECT v.version, v.checksum, v.created_at, a.path as "path?"
+        SELECT v.version, v.checksum, v.created_at, v.yanked, v.targets_json, a.path as "path?"
         FROM versions v
         LEFT JOIN assets a ON a.version_id = v.id
         WHERE v.package_id = ?
@@ -229,12 +283,20 @@ async fn render_package_detail(
         .transpose()?
         .flatten();
 
+    let mut latest_targets = TargetsSection::default();
     let versions = version_rows
         .iter()
-        .map(|row| PackageVersionView {
-            version: row.version.clone(),
-            checksum: row.checksum.clone(),
-            created_at: row.created_at.clone(),
+        .enumerate()
+        .map(|(idx, row)| {
+            if idx == 0 {
+                latest_targets = targets_from_opt(row.targets_json.as_deref());
+            }
+            PackageVersionView {
+                version: row.version.clone(),
+                checksum: row.checksum.clone(),
+                created_at: row.created_at.clone(),
+                yanked: row.yanked != 0,
+            }
         })
         .collect::<Vec<_>>();
 
@@ -246,6 +308,7 @@ async fn render_package_detail(
         latest_version: latest_version.clone(),
         install_add: format!("apexrc add {}", pkg.name),
         install_install: "apexrc install".to_string(),
+        targets: describe_targets(&latest_targets),
     };
 
     let template = PackageTemplate {
@@ -392,20 +455,25 @@ async fn render_packages_view(
     query: PackagesQuery,
     signed_in: Option<String>,
 ) -> Result<HtmlPage, AppError> {
-    let per_page = 20usize;
+    let per_page = query.per_page.unwrap_or(20).clamp(5, 100);
     let page = query.page.unwrap_or(1).max(1);
     let offset = (page - 1) * per_page;
-    let search_term = query.search.as_ref().and_then(|s| {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    });
+    let search_term = query
+        .q
+        .or(query.search)
+        .as_ref()
+        .and_then(|s| {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
     let sort = match query.sort.as_deref() {
         Some("name") => "name",
-        _ => "recent",
+        Some("updated") => "updated",
+        _ => "updated",
     };
 
     let mut list_builder = QueryBuilder::<Sqlite>::new(
@@ -414,8 +482,8 @@ async fn render_packages_view(
                p.name,
                p.description,
                u.username as owner_name,
-               (SELECT version FROM versions v WHERE v.package_id = p.id ORDER BY v.created_at DESC LIMIT 1) as latest_version,
-               (SELECT created_at FROM versions v WHERE v.package_id = p.id ORDER BY v.created_at DESC LIMIT 1) as updated_at
+               (SELECT version FROM versions v WHERE v.package_id = p.id AND v.yanked = 0 ORDER BY v.created_at DESC LIMIT 1) as latest_version,
+               (SELECT created_at FROM versions v WHERE v.package_id = p.id AND v.yanked = 0 ORDER BY v.created_at DESC LIMIT 1) as updated_at
         FROM packages p
         JOIN users u ON p.owner_id = u.id
         "#,
@@ -474,6 +542,7 @@ async fn render_packages_view(
         search_value: search_term.clone().unwrap_or_default(),
         search_param: search_term.clone(),
         sort: sort.to_string(),
+        per_page,
     };
     let body = template
         .render()
@@ -578,7 +647,7 @@ async fn get_package(
 ) -> Result<Json<PackageDetail>, AppError> {
     let pkg = sqlx::query_as::<_, PackageRow>(
         r#"
-        SELECT p.id, p.name, p.description, p.owner_id, u.username as owner_name
+        SELECT p.id, p.name, p.description, p.metadata_json, p.owner_id, u.username as owner_name
         FROM packages p
         JOIN users u ON p.owner_id = u.id
         WHERE p.name = ?
@@ -587,24 +656,80 @@ async fn get_package(
     .bind(&name)
     .fetch_one(&state.pool)
     .await?;
-    let versions = sqlx::query_as::<_, VersionRow>(
-        "SELECT id, version, checksum, created_at FROM versions WHERE package_id = ? ORDER BY created_at DESC",
+    let versions: Vec<PackageVersion> = sqlx::query_as::<_, VersionRow>(
+        "SELECT id, version, checksum, created_at, targets_json FROM versions WHERE package_id = ? ORDER BY created_at DESC",
     )
     .bind(pkg.id)
     .fetch_all(&state.pool)
     .await?
     .into_iter()
-    .map(|v| PackageVersion {
-        version: v.version,
-        checksum: v.checksum,
-        created_at: v.created_at,
+    .map(|v| {
+        let targets = targets_from_opt(v.targets_json.as_deref());
+        PackageVersion {
+            version: v.version,
+            checksum: v.checksum,
+            created_at: v.created_at,
+            targets,
+        }
     })
     .collect();
+    let package_targets = versions
+        .first()
+        .map(|v| v.targets.clone())
+        .unwrap_or_default();
     Ok(Json(PackageDetail {
         name: pkg.name,
         description: pkg.description,
         owner: pkg.owner_name,
         versions,
+        targets: package_targets,
+    }))
+}
+
+async fn list_versions(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<PackageVersionsResponse>, AppError> {
+    let pkg = sqlx::query("SELECT id, name FROM packages WHERE name = ?")
+        .bind(&name)
+        .fetch_optional(&state.pool)
+        .await?;
+    let pkg = pkg.ok_or_else(|| AppError::not_found("package not found"))?;
+    let package_id: i64 = pkg.get("id");
+    let versions = sqlx::query(
+        r#"
+        SELECT version, checksum, created_at, yanked, manifest_json, targets_json
+        FROM versions
+        WHERE package_id = ?
+        ORDER BY created_at DESC
+        "#,
+    )
+    .bind(package_id)
+    .fetch_all(&state.pool)
+    .await?;
+    if versions.is_empty() {
+        return Err(AppError::not_found("package has no versions"));
+    }
+    let mut response_versions = Vec::new();
+    for row in versions {
+        let manifest_json: String = row.get("manifest_json");
+        let targets_text: String = row.get("targets_json");
+        let targets = targets_from_opt(Some(targets_text.as_str()));
+        let manifest: Manifest =
+            serde_json::from_str(&manifest_json).map_err(|e| AppError::bad_request(e.to_string()))?;
+        let dependencies = manifest.dependencies;
+        response_versions.push(PackageVersionDescriptor {
+            version: row.get::<String, _>("version"),
+            checksum: row.get::<String, _>("checksum"),
+            created_at: row.get::<String, _>("created_at"),
+            yanked: row.get::<i64, _>("yanked") != 0,
+            dependencies,
+            targets,
+        });
+    }
+    Ok(Json(PackageVersionsResponse {
+        name,
+        versions: response_versions,
     }))
 }
 
@@ -656,6 +781,7 @@ async fn publish(
         .map(|s| s.to_string())
         .ok_or_else(|| AppError::bad_request("missing X-Checksum header"))?;
     let mut manifest_text = None;
+    let mut manifest_json_override = None;
     let mut tarball = None;
     while let Some(field) = multipart.next_field().await? {
         let name = field.name().unwrap_or("").to_string();
@@ -678,6 +804,17 @@ async fn publish(
                 }
                 tarball = Some(data.to_vec())
             }
+            "manifest_json" => {
+                if data.len() > MAX_MANIFEST_BYTES {
+                    return Err(AppError::payload_too_large(
+                        "manifest_json field exceeds size limit",
+                    ));
+                }
+                manifest_json_override = Some(
+                    String::from_utf8(data.to_vec())
+                        .map_err(|_| AppError::bad_request("manifest_json must be utf8"))?,
+                );
+            }
             _ => {}
         }
     }
@@ -687,7 +824,13 @@ async fn publish(
     if computed != checksum_header {
         return Err(AppError::bad_request("checksum mismatch"));
     }
-    let manifest: Manifest = toml::from_str(&manifest_text)?;
+    let manifest_from_toml: Manifest = toml::from_str(&manifest_text)?;
+    let manifest = if let Some(ref json_raw) = manifest_json_override {
+        serde_json::from_str::<Manifest>(json_raw)
+            .map_err(|e| AppError::bad_request(format!("invalid manifest_json: {e}")))?
+    } else {
+        manifest_from_toml.clone()
+    };
     if manifest.package.language.to_lowercase() != "afml" {
         return Err(AppError::bad_request(
             "only AFML packages are supported in phase 1",
@@ -696,24 +839,32 @@ async fn publish(
     let version = Version::parse(&manifest.package.version)
         .map_err(|e| AppError::bad_request(e.to_string()))?;
     validate_tarball(&tarball)?;
+    let manifest_json_to_store = if let Some(raw) = manifest_json_override {
+        raw
+    } else {
+        serde_json::to_string(&manifest_from_toml)?
+    };
+    let targets_json = serde_json::to_string(&manifest.targets)?;
+    let package_metadata_json = serde_json::to_string(&manifest.package)?;
     let mut tx = state.pool.begin().await?;
     let package_id = ensure_package(
         &mut tx,
         &manifest.package.name,
         &manifest.package.description,
+        &package_metadata_json,
         user.id,
     )
     .await?;
     ensure_version_unique(&mut tx, package_id, &version).await?;
     let created_at = now_string();
-    let manifest_json = serde_json::to_string(&manifest)?;
     let version_rec = sqlx::query(
-        "INSERT INTO versions(package_id, version, checksum, manifest_json, created_at) VALUES(?,?,?,?,?) RETURNING id",
+        "INSERT INTO versions(package_id, version, checksum, manifest_json, targets_json, created_at) VALUES(?,?,?,?,?,?) RETURNING id",
     )
     .bind(package_id)
     .bind(version.to_string())
     .bind(&computed)
-    .bind(manifest_json)
+    .bind(&manifest_json_to_store)
+    .bind(&targets_json)
     .bind(&created_at)
     .fetch_one(&mut *tx)
     .await?;
@@ -740,30 +891,48 @@ async fn ensure_package(
     tx: &mut Transaction<'_, sqlx::Sqlite>,
     name: &str,
     description: &Option<String>,
+    metadata_json: &str,
     owner_id: i64,
 ) -> Result<i64, AppError> {
-    if let Some(existing) = sqlx::query("SELECT id, owner_id FROM packages WHERE name = ?")
+    if let Some(existing) = sqlx::query("SELECT id FROM packages WHERE name = ?")
         .bind(name)
         .fetch_optional(&mut **tx)
         .await?
     {
-        let existing_owner: i64 = existing.get("owner_id");
-        if existing_owner != owner_id {
-            return Err(AppError::conflict("package owned by another user"));
-        }
-        Ok(existing.get("id"))
+        let package_id: i64 = existing.get("id");
+        ensure_owner_membership(tx, package_id, owner_id).await?;
+        sqlx::query(
+            "UPDATE packages SET description = COALESCE(?, description), metadata_json = ? WHERE id = ?",
+        )
+        .bind(description)
+        .bind(metadata_json)
+        .bind(package_id)
+        .execute(&mut **tx)
+        .await?;
+        Ok(package_id)
     } else {
         let created_at = now_string();
         let record = sqlx::query(
-            "INSERT INTO packages(name, owner_id, description, created_at) VALUES(?,?,?,?) RETURNING id",
+            "INSERT INTO packages(name, owner_id, description, metadata_json, created_at) VALUES(?,?,?,?,?) RETURNING id",
         )
         .bind(name)
         .bind(owner_id)
         .bind(description)
-        .bind(created_at)
+        .bind(metadata_json)
+        .bind(created_at.clone())
         .fetch_one(&mut **tx)
         .await?;
-        Ok(record.get("id"))
+        let package_id: i64 = record.get("id");
+        sqlx::query(
+            "INSERT INTO package_owners(package_id, user_id, role, created_at) VALUES(?,?,?,?)",
+        )
+        .bind(package_id)
+        .bind(owner_id)
+        .bind("owner")
+        .bind(created_at)
+        .execute(&mut **tx)
+        .await?;
+        Ok(package_id)
     }
 }
 
@@ -781,6 +950,25 @@ async fn ensure_version_unique(
         return Err(AppError::conflict("version already exists"));
     }
     Ok(())
+}
+
+async fn ensure_owner_membership(
+    tx: &mut Transaction<'_, sqlx::Sqlite>,
+    package_id: i64,
+    owner_id: i64,
+) -> Result<(), AppError> {
+    let exists = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM package_owners WHERE package_id = ? AND user_id = ?",
+    )
+    .bind(package_id)
+    .bind(owner_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if exists.is_some() {
+        Ok(())
+    } else {
+        Err(AppError::conflict("package owned by another user"))
+    }
 }
 
 fn validate_tarball(data: &[u8]) -> Result<(), AppError> {
@@ -925,6 +1113,184 @@ fn apply_search_filter(builder: &mut QueryBuilder<Sqlite>, term: Option<&String>
     }
 }
 
+async fn yank_version(
+    State(state): State<AppState>,
+    AuthExtractor(user): AuthExtractor,
+    Path((name, version)): Path<(String, String)>,
+) -> Result<Json<PublishResponse>, AppError> {
+    set_yank_state(&state, user.id, name, version, true).await
+}
+
+async fn unyank_version(
+    State(state): State<AppState>,
+    AuthExtractor(user): AuthExtractor,
+    Path((name, version)): Path<(String, String)>,
+) -> Result<Json<PublishResponse>, AppError> {
+    set_yank_state(&state, user.id, name, version, false).await
+}
+
+async fn set_yank_state(
+    state: &AppState,
+    user_id: i64,
+    name: String,
+    version: String,
+    yank: bool,
+) -> Result<Json<PublishResponse>, AppError> {
+    let package_id = require_package_owner(&state.pool, &name, user_id).await?;
+    let result = sqlx::query(
+        "UPDATE versions SET yanked = ? WHERE package_id = ? AND version = ?",
+    )
+    .bind(if yank { 1 } else { 0 })
+    .bind(package_id)
+    .bind(&version)
+    .execute(&state.pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::not_found("version not found"));
+    }
+    Ok(Json(PublishResponse { name, version }))
+}
+
+async fn list_owners(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<OwnerListResponse>, AppError> {
+    let package_id = fetch_package_id(&state.pool, &name).await?;
+    let owners = fetch_owner_names(&state.pool, package_id).await?;
+    Ok(Json(OwnerListResponse {
+        package: name,
+        owners,
+    }))
+}
+
+async fn add_owner(
+    State(state): State<AppState>,
+    AuthExtractor(user): AuthExtractor,
+    Path(name): Path<String>,
+    Json(payload): Json<OwnerRequest>,
+) -> Result<Json<OwnerListResponse>, AppError> {
+    let package_id = require_package_owner(&state.pool, &name, user.id).await?;
+    let target = fetch_user_by_username(&state.pool, &payload.username)
+        .await?
+        .ok_or_else(|| AppError::not_found("user not found"))?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO package_owners(package_id, user_id, role, created_at) VALUES(?,?,?,?)",
+    )
+    .bind(package_id)
+    .bind(target.id)
+    .bind("owner")
+    .bind(now_string())
+    .execute(&state.pool)
+    .await?;
+    let owners = fetch_owner_names(&state.pool, package_id).await?;
+    Ok(Json(OwnerListResponse {
+        package: name,
+        owners,
+    }))
+}
+
+async fn remove_owner(
+    State(state): State<AppState>,
+    AuthExtractor(user): AuthExtractor,
+    Path((name, owner)): Path<(String, String)>,
+) -> Result<Json<OwnerListResponse>, AppError> {
+    let package_id = require_package_owner(&state.pool, &name, user.id).await?;
+    let target = fetch_user_by_username(&state.pool, &owner)
+        .await?
+        .ok_or_else(|| AppError::not_found("user not found"))?;
+    let owner_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM package_owners WHERE package_id = ?",
+    )
+    .bind(package_id)
+    .fetch_one(&state.pool)
+    .await?;
+    if owner_count <= 1 {
+        return Err(AppError::bad_request("cannot remove the last owner"));
+    }
+    let result = sqlx::query(
+        "DELETE FROM package_owners WHERE package_id = ? AND user_id = ?",
+    )
+    .bind(package_id)
+    .bind(target.id)
+    .execute(&state.pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::bad_request("specified user is not an owner"));
+    }
+    let owners = fetch_owner_names(&state.pool, package_id).await?;
+    Ok(Json(OwnerListResponse {
+        package: name,
+        owners,
+    }))
+}
+
+async fn fetch_package_id(pool: &SqlitePool, name: &str) -> Result<i64, AppError> {
+    let row = sqlx::query("SELECT id FROM packages WHERE name = ?")
+        .bind(name)
+        .fetch_optional(pool)
+        .await?;
+    row.map(|r| r.get("id"))
+        .ok_or_else(|| AppError::not_found("package not found"))
+}
+
+async fn require_package_owner(
+    pool: &SqlitePool,
+    name: &str,
+    user_id: i64,
+) -> Result<i64, AppError> {
+    let package_id = fetch_package_id(pool, name).await?;
+    let owns = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM package_owners WHERE package_id = ? AND user_id = ?",
+    )
+    .bind(package_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    if owns.is_some() {
+        Ok(package_id)
+    } else {
+        Err(AppError::unauthorized("not an owner of this package"))
+    }
+}
+
+async fn fetch_owner_names(pool: &SqlitePool, package_id: i64) -> Result<Vec<String>, AppError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT u.username
+        FROM package_owners o
+        JOIN users u ON o.user_id = u.id
+        WHERE o.package_id = ?
+        ORDER BY u.username COLLATE NOCASE
+        "#,
+    )
+    .bind(package_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| row.get::<String, _>("username"))
+        .collect())
+}
+
+fn targets_from_opt(raw: Option<&str>) -> TargetsSection {
+    raw.and_then(|text| serde_json::from_str::<TargetsSection>(text).ok())
+        .unwrap_or_default()
+}
+
+fn describe_targets(targets: &TargetsSection) -> Vec<String> {
+    let mut labels = Vec::new();
+    if targets.afml.is_some() {
+        labels.push("AFML".to_string());
+    }
+    if targets.rust.is_some() {
+        labels.push("Rust".to_string());
+    }
+    if targets.java.is_some() {
+        labels.push("Java".to_string());
+    }
+    labels
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -987,14 +1353,38 @@ name = "hello-afml"
 version = "0.1.0"
 language = "afml"
 description = "demo"
+[targets.afml]
+entry = "src/lib.afml"
 [dependencies]
 [registry]
 url = "http://localhost"
 "#;
+        let manifest_json = json!({
+            "package": {
+                "name": "hello-afml",
+                "version": "0.1.0",
+                "language": "afml",
+                "description": "demo",
+                "license": "MIT",
+                "keywords": ["demo"],
+                "readme": "README.md",
+                "min_runtime": ">=1.0.0",
+                "authors": []
+            },
+            "dependencies": {},
+            "registry": { "url": "http://localhost" },
+            "targets": {
+                "afml": { "entry": "src/lib.afml" }
+            }
+        });
         let tarball = sample_tarball()?;
         let checksum = hex::encode(Sha256::digest(&tarball));
         let form = multipart::Form::new()
             .part("manifest", multipart::Part::text(manifest.to_string()))
+            .part(
+                "manifest_json",
+                multipart::Part::text(manifest_json.to_string()),
+            )
             .part(
                 "tarball",
                 multipart::Part::bytes(tarball.clone())

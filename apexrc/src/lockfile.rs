@@ -9,6 +9,8 @@ pub struct Lockfile {
     pub name: String,
     #[serde(default)]
     pub dependencies: Vec<LockedDependency>,
+    #[serde(default)]
+    pub edges: Vec<LockEdge>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,6 +18,15 @@ pub struct LockedDependency {
     pub name: String,
     pub version: String,
     pub checksum: String,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LockEdge {
+    pub from: String,
+    pub to: String,
+    pub requirement: String,
 }
 
 impl Lockfile {
@@ -38,7 +49,10 @@ impl Lockfile {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        let raw = toml::to_string_pretty(self)?;
+        let mut clone = self.clone();
+        clone.sort_dependencies();
+        clone.sort_edges();
+        let raw = toml::to_string_pretty(&clone)?;
         fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))
     }
 
@@ -52,6 +66,24 @@ impl Lockfile {
         } else {
             self.dependencies.push(dep);
         }
+        self.sort_dependencies();
+    }
+
+    fn sort_dependencies(&mut self) {
+        self.dependencies
+            .sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.version.cmp(&b.version)));
+        for dep in &mut self.dependencies {
+            dep.dependencies.sort();
+        }
+    }
+
+    fn sort_edges(&mut self) {
+        self.edges.sort_by(|a, b| {
+            a.from
+                .cmp(&b.from)
+                .then_with(|| a.to.cmp(&b.to))
+                .then_with(|| a.requirement.cmp(&b.requirement))
+        });
     }
 }
 

@@ -32,6 +32,7 @@ pub struct PackagesTemplate {
     pub search_value: String,
     pub search_param: Option<String>,
     pub sort: String,
+    pub per_page: usize,
 }
 
 #[derive(Clone)]
@@ -39,6 +40,7 @@ pub struct PackageVersionView {
     pub version: String,
     pub checksum: String,
     pub created_at: String,
+    pub yanked: bool,
 }
 
 #[derive(Clone)]
@@ -49,6 +51,7 @@ pub struct PackageDetailView {
     pub latest_version: Option<String>,
     pub install_add: String,
     pub install_install: String,
+    pub targets: Vec<String>,
 }
 
 #[derive(Template)]

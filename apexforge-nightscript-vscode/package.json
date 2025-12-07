@@ -4,6 +4,7 @@
   "description": "Complete ApexForge NightScript (AFNS) experience: syntax highlighting, snippets, completions, and tooling hooks for apexrc projects.",
   "version": "0.1.0",
   "publisher": "afns",
+  "author": "Natiq Mammadov (ApexForge) <https://github.com/Natiqmammad>",
   "icon": "icon.png",
   "engines": {
     "vscode": "^1.85.0"
@@ -14,7 +15,8 @@
   ],
   "main": "./extension.js",
   "activationEvents": [
-    "onLanguage:afml"
+    "onLanguage:afml",
+    "onCommand:apexforge.runApexrcCheck"
   ],
   "contributes": {
     "languages": [
@@ -43,6 +45,13 @@
         "path": "./snippets/nightScript.json"
       }
     ],
+    "commands": [
+      {
+        "command": "apexforge.runApexrcCheck",
+        "title": "ApexForge: Run apexrc check",
+        "category": "ApexForge"
+      }
+    ],
     "iconThemes": [
       {
         "id": "apexforge-icons",
@@ -55,6 +64,26 @@
         "editor.defaultFormatter": "afns.afml-formatter",
         "editor.autoClosingBrackets": "always",
         "editor.autoIndent": "advanced"
+      }
+    },
+    "configuration": {
+      "title": "ApexForge NightScript",
+      "properties": {
+        "apexforge.apexrcPath": {
+          "type": "string",
+          "default": "apexrc",
+          "description": "Path to the apexrc executable used for diagnostics."
+        },
+        "apexforge.apexrcCheckArgs": {
+          "type": "array",
+          "default": [
+            "check"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Arguments passed to apexrc when running background diagnostics."
+        }
       }
     }
   },

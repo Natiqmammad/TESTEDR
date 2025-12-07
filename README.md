@@ -1,5 +1,8 @@
 # 🚀 **ApexForge NightScript (AFNS) – Full Language Spec (REBORN EDITION)**
 
+**Author:** Natiq Mammadov — ApexForge  
+GitHub: https://github.com/Natiqmammad
+
 ![ApexForge Official Logo](assets/branding/apexforge_logo.png)
 
 > **Branding Note:** The ApexForge logo above (see `assets/branding/logo_config.toml`) is the single canonical asset for the entire ecosystem—do not alter or replace it in docs, tools, or releases.
@@ -1461,7 +1464,7 @@ See `examples/registry_demo/README.md` for a hands-on walkthrough.
 ### Registry UI & HTML pages
 
 - `cargo run --manifest-path nightscript-server/Cargo.toml` serves both the JSON API and a Tailwind-powered HTML UI at `http://127.0.0.1:5665`.
-- Landing page (`/`) highlights quick links plus a search box; `/packages` lists packages with pagination, search, and sort (`?search=net&sort=name`).
+- Landing page (`/`) highlights quick links plus a search box; `/packages` supports substring search + pagination directly through query params (`?q=net&page=2&per_page=50&sort=updated|name`).
 - `/package/<name>` renders README.md straight from the uploaded tarball and shows install commands, version history, checksums, and download links.
 - `/owner/<handle>` shows a profile-like list of packages owned by a user; `/login` exposes a dev-only token helper form.
 - Every HTML page sets `Last-Modified`/`ETag`, and JSON equivalents remain at `/api/v1/*` for automation.
@@ -1469,6 +1472,122 @@ See `examples/registry_demo/README.md` for a hands-on walkthrough.
 
   ![ApexForge Registry UI](assets/branding/apexforge_logo.png)
 
+### Manifest metadata & multi-target packages
+
+`Apex.toml` now captures richer package metadata plus optional targets so libraries written in AFML, Rust, or Java can advertise their build entry points. All fields remain optional for backward compatibility—existing manifests without `[targets.*]` continue to publish, while new manifests can opt in:
+
+```toml
+[package]
+name = "hello-afml"
+version = "0.2.0"
+license = "MIT"
+description = "Example package"
+keywords = ["hello", "demo"]
+homepage = "https://apexforge.dev/hello-afml"
+repository = "https://github.com/apexforge/hello-afml"
+readme = "README.md"
+min_runtime = ">=1.0.0"
+
+[targets.afml]
+entry = "src/lib.afml"
+
+[targets.rust]
+crate = "hello_afml"
+lib_path = "rust/Cargo.toml"
+build = "cargo build -p hello_afml --release"
+
+[targets.java]
+gradle_path = "java/build.gradle"
+group = "dev.apexforge"
+artifact = "hello-afml"
+version = "0.2.0"
+build = "./gradlew jar"
+```
+
+`apexrc publish` automatically serializes the manifest to JSON (`manifest_json`) and uploads it alongside the `.apkg`. The registry persists the full package metadata plus the per-version target matrix so both the HTML UI and `/api/v1/package/*` JSON endpoints can display badges like “Targets: AFML · Rust · Java.” Older clients that only send the TOML payload are still accepted—the server treats missing sections as defaults.
+
+### Tooling & VS Code integration
+
+- `apexrc check` is now wired into the official VS Code extension (located under `apexforge-nightscript-vscode/`). The editor automatically runs lightweight parse checks on file open/save, surfaces diagnostics through the Problems panel, and mirrors the CLI output inside the “ApexForge apexrc” output channel. Trigger the pass manually via **Command Palette → ApexForge: Run apexrc check**.
+- Configure the CLI path/arguments with `apexforge.apexrcPath` and `apexforge.apexrcCheckArgs` inside VS Code settings when working in sandboxes or with custom toolchains.
+- The VSIX README documents every feature (syntax, snippets, completions, icons, diagnostics) and credits the ApexForge branding assets so teams know the extension is officially sanctioned.
+- `apexrc` + VSIX + registry now form a Cargo-parity workflow: edit `.afml` files with linting, `apexrc check` validates AST/lexer errors, `apexrc build|run` emit ELF binaries, and `apexrc publish/add/install` talks to the local registry described below.
+
+### Forge standard library snapshot
+
+- **forge.fs** — complete filesystem + path API: `read_to_string`, `read_bytes`, `write_string`, `write_bytes`, `append_*`, directory creation/removal (single + recursive), safe delete helpers, `copy_file`, `move`, metadata queries (`FsMetadata` with size/readonly/timestamps), and high-level utilities (`ensure_dir`, `read_lines`, `write_lines`, `copy_dir_recursive`, `join`, `dirname`, `basename`, `extension`, `canonicalize`). All operations use `result<…, str>` and integrate with Phase‑5 generics.
+- **forge.net** — synchronous TCP/UDP surface with the full socket toolkit: `tcp_connect`, `tcp_listen`, `tcp_accept`, send/recv helpers, graceful shutdown, per-socket flags (`set_nodelay`, read/write timeouts), address introspection, and UDP wrappers (`udp_bind`, `udp_send_to`, `udp_recv_from`, broadcast toggles). The native backend lowers these calls to Linux syscalls.
+- **forge.db** — multi-backend database layer: SQLite (`rusqlite`), PostgreSQL (`sqlx`), and Redis (`redis-rs`). AFNS code can `db.open`, `db.exec`, `db.query`, `db.begin/commit/rollback`, and issue key–value operations (`db.get/set/del`). Example projects (`examples/db_*`) showcase real connections.
+- **forge.async** — Tokio-powered runtime glue plus convenience intrinsics (`async.parallel`, `async.race`, `async.all`, `async.interval`, `async.retry`, etc.) that all ship with snippets/completions.
+- **forge.log / Flutter UI / generics** — logging macros, Flutter-style widget DSL (`ctx.*`), and the generic-heavy samples (`examples/generics_*`, `examples/custom_generic_type`) continue to inform snippets/completions so every forge module behaves consistently across compiler + VSIX tooling.
+
+#### forge.fs quick reference
+
+- File IO: `read_to_string`, `read_bytes`, `write_string`, `write_bytes`, `append_string`, `append_bytes`, `touch`, `remove_file`.
+- Directories: `create_dir`, `create_dir_all`, `remove_dir`, `remove_dir_all`, `ensure_dir`.
+- Utilities: `copy_file`, `move`, `copy_dir_recursive`, `read_dir`, `read_lines`, `write_lines`.
+- Metadata & paths: `metadata`, `symlink_metadata`, `exists`, `is_file`, `is_dir`, `join`, `dirname`, `basename`, `extension`, `parent`, `canonicalize`.
+- Structures: `fs::FsMetadata` (size, timestamps, readonly flags) and `fs::DirEntry` (path, file_name, type markers).
+
+#### forge.net quick reference
+
+- TCP: `tcp_connect`, `tcp_listen`, `tcp_accept`, `tcp_send`, `tcp_recv`, `tcp_shutdown`, `tcp_set_nodelay`, `tcp_set_read_timeout`, `tcp_set_write_timeout`, `tcp_peer_addr`, `tcp_local_addr`.
+- UDP: `udp_bind`, `udp_connect`, `udp_send`, `udp_send_to`, `udp_recv`, `udp_recv_from`, `udp_set_broadcast`, `udp_set_read_timeout`, `udp_set_write_timeout`, `udp_peer_addr`, `udp_local_addr`.
+- Lifetimes: `close_socket`, `close_listener` ensure descriptors are released deterministically.
+
+#### forge.db quick reference
+
+- Connection mgmt: `db.open(kind, target)`, `db.close(conn)` for SQLite/Postgres/Redis URIs.
+- SQL helpers: `db.exec`, `db.query`, `db.begin`, `db.commit`, `db.rollback`.
+- Key-value helpers (Redis): `db.get`, `db.set`, `db.del`.
+- Result types: `db::ExecResult { rows_affected }`, query results as `vec<map<str, Value>>`, and redis-style `option<Value>`.
+
+#### forge.async + Flutter DSL
+
+- Async primitives: `async.parallel`, `async.race`, `async.all`, `async.any`, `async.interval`, `async.retry`, `async.sleep`, `async.timeout`, `async.spawn`, etc.
+- UI snippets: `ctx.text`, `ctx.button`, `ctx.column`, `ctx.row`, `ctx.scaffold`, `ctx.image`, `ctx.list`, `ctx.widget`.
+- Logging: `forge.log.info`, `.warn`, `.error` macros appear in completions/snippets so instrumentation is one keystroke away.
+
+---
+
+## ✅ **Dependency Resolution**
+ 
+- Supports the full semver grammar: caret (`^`), tilde (`~`), exact (`=`), inequality ranges (`>=`, `<=`, `<`, `>`), and wildcards (`*`, `1.*`). Conflicts surface with a list of the constraints that disagreed so it is easy to fix manifests.
+- `Apex.lock` stores the entire resolved graph (direct + transitive) deterministically. Locked builds (`apexrc build/run/perf`) refuse to touch the network if the lockfile is missing or stale—run `apexrc install`/`apexrc update` to refresh.
+- CLI parity with Cargo:
+  - `apexrc add foo@^1.0` / `apexrc remove foo` edit `Apex.toml`, resolve, and vendor under `target/vendor/afml/<name>@<version>/`.
+  - `apexrc update` refreshes every dependency, while `apexrc update foo bar` only unlocks the listed roots (everything else stays pinned to the lock).
+  - `apexrc outdated` prints available upgrades; `apexrc tree` renders the lockfile dependency tree; `apexrc why foo` explains why `foo` was selected (constraints + dependency paths).
+  - `apexrc install --locked` installs strictly from `Apex.lock`; omitting `--locked` re-runs the solver and rewrites the lockfile.
+- Vendor pruning happens automatically—unused packages are removed from `target/vendor/afml/` after each resolve cycle, with download progress bars provided by `indicatif` (use `--quiet` to suppress them).
+ 
+Example workflow:
+ 
+```bash
+apexrc add forge.fs@^1.2
+apexrc install
+apexrc update forge.fs
+apexrc outdated
+apexrc tree
+apexrc why forge.fs
+```
+
+Sample output:
+
+```bash
+$ apexrc tree
+├── forge.fs@1.2.1 (req ^1.2)
+└── forge.log@0.5.0 (req =0.5.0)
+
+$ apexrc why forge.fs
+forge.fs @ 1.2.1 (07fdd…)
+Constraints:
+  - registry-app (manifest) requires ^1.2
+  - forge.shell@0.3.0 requires >=1.2, <2
+Dependency paths:
+  - registry-app -> forge.shell -> forge.fs
+```
+ 
 ---
 
 # ✅ **12. forge.collections — FULL COLLECTIONS**
@@ -1525,3 +1644,8 @@ buf.seek()
 ```
 
 ---
+
+## Credits
+
+Created by **Natiq Mammadov — ApexForge**  
+GitHub: https://github.com/Natiqmammad
