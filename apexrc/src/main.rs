@@ -12,9 +12,10 @@ mod lockfile;
 mod package_archive;
 mod resolver;
 mod user_config;
+mod vendor_index;
 
 use commands::{
-    build, check, clean, deps, init, install, login as login_cmd, new, perf, run, single,
+    build, check, clean, deps, doctor, init, install, login as login_cmd, new, perf, run, single,
     uninstall, whoami as whoami_cmd,
 };
 use config::ApexConfig;
@@ -182,6 +183,11 @@ enum Command {
         #[arg(long)]
         release: bool,
     },
+    /// Inspect native artifacts for the current project
+    Doctor {
+        #[arg(long, value_name = "DIR")]
+        manifest_path: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -326,6 +332,10 @@ fn main() -> Result<()> {
                 build::BuildProfile::Debug
             };
             perf::run_perf(&mut ctx, target, profile)?;
+        }
+        Some(Command::Doctor { manifest_path }) => {
+            let ctx = ProjectContext::load(manifest_path)?;
+            commands::doctor::doctor(&ctx)?;
         }
         Some(Command::Login { registry }) => {
             login_cmd::login(registry.as_deref())?;

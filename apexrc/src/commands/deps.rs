@@ -16,6 +16,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
+use crate::vendor_index::{load_index, persist_index, VendorExportEntry};
 const MAX_DOWNLOAD_ATTEMPTS: usize = 3;
 
 use crate::{
@@ -455,6 +456,33 @@ fn vendor_dependency(ctx: &ProjectContext, dep: &LockedDependency) -> Result<()>
     }
     let src = config::packages_root()?.join(&dep.name).join(&dep.version);
     copy_dir(&src, &dest)?;
+    register_vendor_exports(ctx, dep, &dest)?;
+    Ok(())
+}
+
+fn register_vendor_exports(
+    ctx: &ProjectContext,
+    dep: &LockedDependency,
+    dest: &Path,
+) -> Result<()> {
+    let exports_path = dest.join(".afml/exports.json");
+    if !exports_path.is_file() {
+        return Ok(());
+    }
+    let rel_path = exports_path
+        .strip_prefix(&ctx.root)
+        .unwrap_or(&exports_path)
+        .to_path_buf();
+    let mut index = load_index(&ctx.root)?;
+    index
+        .entries
+        .retain(|entry| !(entry.name == dep.name && entry.version == dep.version));
+    index.entries.push(VendorExportEntry {
+        name: dep.name.clone(),
+        version: dep.version.clone(),
+        path: rel_path.to_string_lossy().into_owned(),
+    });
+    persist_index(&ctx.root, &index)?;
     Ok(())
 }
 

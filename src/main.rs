@@ -4,6 +4,7 @@ mod diagnostics;
 mod flutter;
 mod lexer;
 mod module_loader;
+mod native;
 mod parser;
 mod runtime;
 mod span;

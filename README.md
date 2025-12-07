@@ -1512,6 +1512,7 @@ build = "./gradlew jar"
 - Configure the CLI path/arguments with `apexforge.apexrcPath` and `apexforge.apexrcCheckArgs` inside VS Code settings when working in sandboxes or with custom toolchains.
 - The VSIX README documents every feature (syntax, snippets, completions, icons, diagnostics) and credits the ApexForge branding assets so teams know the extension is officially sanctioned.
 - `apexrc` + VSIX + registry now form a Cargo-parity workflow: edit `.afml` files with linting, `apexrc check` validates AST/lexer errors, `apexrc build|run` emit ELF binaries, and `apexrc publish/add/install` talks to the local registry described below.
+- `apexrc install` reads `.afml/exports.json` for every dependency (each entry now describes `targets` plus an optional `java_class`/signature hint), copies it into `target/vendor/afml/<name>@<version>`, and updates `target/vendor/.index.json`. Native dependencies drop compiled libraries into `.afml/lib/<triplet>/`, while Java dependencies drop shaded JARs under `.afml/java/`. The runtime module loader binds Rust exports via `libloading` and invokes Java exports through JNI using the declared `java_class` metadata. `apexrc doctor` inspects every vendor entry, prints the native library status, the resolved `.afml/java` JAR path, and the host `java -version` output so you can fix missing artifacts before execution.
 
 ### Forge standard library snapshot
 

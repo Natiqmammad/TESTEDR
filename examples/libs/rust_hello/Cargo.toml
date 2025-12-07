@@ -1,0 +1,11 @@
+[package]
+name = "rust_hello"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rust_hello"
+crate-type = ["cdylib"]
+
+[dependencies]
+afml-sdk = { path = "../../sdk/rust/afml-sdk" }

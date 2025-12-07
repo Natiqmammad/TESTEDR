@@ -21,6 +21,7 @@ pub mod ir;
 pub mod lexer;
 pub mod lsp;
 pub mod module_loader;
+pub mod native;
 pub mod parser;
 pub mod runtime;
 pub mod span;

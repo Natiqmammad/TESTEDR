@@ -1,0 +1,13 @@
+[package]
+name = "app_with_libs"
+version = "0.1.0"
+language = "afml"
+description = "App demonstrating exports from AFML/Rust/Java SDKs"
+
+[dependencies]
+afml_hello = "0.1.0"
+rust_hello = "0.1.0"
+java_hello = "0.1.0"
+
+[registry]
+url = "http://127.0.0.1:5665"

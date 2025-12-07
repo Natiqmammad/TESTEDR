@@ -1,0 +1,9 @@
+[package]
+name = "afml_hello"
+version = "0.1.0"
+language = "afml"
+description = "AFML SDK sample"
+[targets.afml]
+entry = "src/lib.afml"
+[registry]
+url = "http://127.0.0.1:5665"

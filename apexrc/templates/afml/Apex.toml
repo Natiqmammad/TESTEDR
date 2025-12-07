@@ -11,3 +11,6 @@ min_runtime = "1.0.0"
 
 [registry]
 url = "http://127.0.0.1:5665"
+
+[targets.afml]
+entry = "src/lib.afml"

@@ -1,0 +1,14 @@
+[package]
+name = "java_hello"
+version = "0.1.0"
+language = "java"
+description = "Java SDK sample"
+
+[targets.java]
+artifact = "java_hello"
+version = "0.1.0"
+build = "./gradlew jar"
+out_dir = "build/libs"
+
+[registry]
+url = "http://127.0.0.1:5665"

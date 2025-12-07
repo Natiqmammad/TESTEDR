@@ -1,0 +1,14 @@
+[package]
+name = "rust_hello"
+version = "0.1.0"
+language = "afml"
+description = "Rust SDK sample"
+[targets.rust]
+crate = "rust_hello"
+lib_path = "Cargo.toml"
+build = "cargo build --release"
+out_dir = "target/release"
+lib_name = "rust_hello"
+abi = "c"
+[registry]
+url = "http://127.0.0.1:5665"

@@ -1,0 +1,21 @@
+import forge.log as log;
+import afml_hello as hello;
+import java_hello as java;
+import rust_hello as rust;
+
+fun apex() {
+    let greeting:: str = hello.hello("world");
+    log.info("afml_hello ->", greeting);
+
+    let native_greet:: str = rust.greet("world");
+    log.info("rust_hello.greet ->", native_greet);
+
+    let total:: i32 = rust.add(5, 7);
+    log.info("rust_hello.add ->", total);
+
+    let java_greeting:: str = java.greet_java();
+    log.info("java_hello.greet_java ->", java_greeting);
+
+    let java_sum:: i32 = java.sum(4, 8);
+    log.info("java_hello.sum ->", java_sum);
+}

@@ -1,9 +1,13 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ffi::{CStr, CString};
 use std::fmt;
 use std::io::{Read, Write};
+use std::mem;
 use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::ops::{Deref, DerefMut};
+use std::os::raw::{c_char, c_void};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -14,7 +18,9 @@ use crate::ast::{
     Block, Expr, File, IfStmt, Import, Item, Literal, NamedType, Param, Pattern, Stmt, SwitchStmt,
     TryCatch, TypeExpr,
 };
-use crate::module_loader::ModuleLoader;
+use crate::module_loader::{ExportMeta, ExportSchema, ModuleLoader};
+use java_runtime::JavaRuntime;
+use libloading::Library;
 
 #[cfg(target_os = "android")]
 pub mod android;
@@ -31,6 +37,7 @@ pub mod flutter_layers;
 pub mod flutter_scene;
 pub mod flutter_vm;
 mod forge;
+mod java_runtime;
 pub mod web;
 
 #[derive(Debug)]
@@ -63,6 +70,286 @@ impl fmt::Display for RuntimeError {
 impl std::error::Error for RuntimeError {}
 
 pub type RuntimeResult<T> = Result<T, RuntimeError>;
+
+#[derive(Clone)]
+struct NativeBinding {
+    name: String,
+    signature: NativeSignature,
+    symbol: *const c_void,
+    library: Rc<Library>,
+}
+
+impl NativeBinding {
+    fn new(
+        name: String,
+        signature: NativeSignature,
+        symbol: *const c_void,
+        library: Rc<Library>,
+    ) -> Self {
+        Self {
+            name,
+            signature,
+            symbol,
+            library,
+        }
+    }
+
+    fn call(&self, _: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        let prepared = PreparedArg::prepare(args, &self.signature)?;
+        match (self.signature.params.as_slice(), self.signature.return_type) {
+            ([], None) => {
+                let func: unsafe extern "C" fn() = unsafe { mem::transmute(self.symbol) };
+                unsafe { func() };
+                Ok(Value::Null)
+            }
+            ([], Some(NativeType::Str)) => {
+                let func: unsafe extern "C" fn() -> *const c_char =
+                    unsafe { mem::transmute(self.symbol) };
+                let res = unsafe { func() };
+                Self::string_result(res)
+            }
+            ([], Some(NativeType::I32)) => {
+                let func: unsafe extern "C" fn() -> i32 = unsafe { mem::transmute(self.symbol) };
+                Ok(Value::Int(unsafe { func() } as i64))
+            }
+            ([], Some(NativeType::I64)) => {
+                let func: unsafe extern "C" fn() -> i64 = unsafe { mem::transmute(self.symbol) };
+                Ok(Value::Int(unsafe { func() }))
+            }
+            ([], Some(NativeType::Bool)) => {
+                let func: unsafe extern "C" fn() -> i32 = unsafe { mem::transmute(self.symbol) };
+                Ok(Value::Bool(unsafe { func() } != 0))
+            }
+            ([NativeType::Str], Some(NativeType::Str)) => {
+                let func: unsafe extern "C" fn(*const c_char) -> *const c_char =
+                    unsafe { mem::transmute(self.symbol) };
+                let res = unsafe { func(prepared[0].as_ptr()) };
+                Self::string_result(res)
+            }
+            ([NativeType::Str], Some(NativeType::Bool)) => {
+                let func: unsafe extern "C" fn(*const c_char) -> i32 =
+                    unsafe { mem::transmute(self.symbol) };
+                Ok(Value::Bool(unsafe { func(prepared[0].as_ptr()) } != 0))
+            }
+            ([NativeType::Str], Some(NativeType::I32)) => {
+                let func: unsafe extern "C" fn(*const c_char) -> i32 =
+                    unsafe { mem::transmute(self.symbol) };
+                Ok(Value::Int(unsafe { func(prepared[0].as_ptr()) } as i64))
+            }
+            ([NativeType::Str, NativeType::Str], Some(NativeType::Str)) => {
+                let func: unsafe extern "C" fn(*const c_char, *const c_char) -> *const c_char =
+                    unsafe { mem::transmute(self.symbol) };
+                let res = unsafe { func(prepared[0].as_ptr(), prepared[1].as_ptr()) };
+                Self::string_result(res)
+            }
+            ([NativeType::Str, NativeType::Str], Some(NativeType::Bool)) => {
+                let func: unsafe extern "C" fn(*const c_char, *const c_char) -> i32 =
+                    unsafe { mem::transmute(self.symbol) };
+                Ok(Value::Bool(
+                    unsafe { func(prepared[0].as_ptr(), prepared[1].as_ptr()) } != 0,
+                ))
+            }
+            ([NativeType::I32], Some(NativeType::I32)) => {
+                let func: unsafe extern "C" fn(i32) -> i32 = unsafe { mem::transmute(self.symbol) };
+                let res = unsafe { func(prepared[0].as_i32()) };
+                Ok(Value::Int(res as i64))
+            }
+            ([NativeType::I32, NativeType::I32], Some(NativeType::I32)) => {
+                let func: unsafe extern "C" fn(i32, i32) -> i32 =
+                    unsafe { mem::transmute(self.symbol) };
+                let res = unsafe { func(prepared[0].as_i32(), prepared[1].as_i32()) };
+                Ok(Value::Int(res as i64))
+            }
+            _ => Err(RuntimeError::new(format!(
+                "unsupported native signature: {:?}",
+                self.signature
+            ))),
+        }
+    }
+
+    fn string_result(ptr: *const c_char) -> RuntimeResult<Value> {
+        if ptr.is_null() {
+            return Ok(Value::Null);
+        }
+        let cstr = unsafe { CStr::from_ptr(ptr) };
+        Ok(Value::String(cstr.to_string_lossy().into_owned()))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct NativeSignature {
+    params: Vec<NativeType>,
+    return_type: Option<NativeType>,
+}
+
+impl NativeSignature {
+    fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if !text.starts_with("fn") {
+            return None;
+        }
+        let rest = text[2..].trim();
+        let start = rest.find('(')?;
+        let end = rest[start..].find(')')? + start;
+        let params_text = &rest[start + 1..end];
+        let params = params_text
+            .split(',')
+            .filter_map(|part| {
+                let trimmed = part.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    NativeType::from_name(trimmed)
+                }
+            })
+            .collect::<Vec<_>>();
+        let after = rest[end + 1..].trim();
+        let return_type = if after.starts_with("->") {
+            let ret = after[2..].trim();
+            if ret.is_empty() {
+                None
+            } else {
+                NativeType::from_name(ret)
+            }
+        } else {
+            None
+        };
+        Some(Self {
+            params,
+            return_type,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeType {
+    Str,
+    I32,
+    I64,
+    Bool,
+    Bytes,
+}
+
+impl NativeType {
+    fn from_name(name: &str) -> Option<Self> {
+        match name.to_lowercase().as_str() {
+            "str" => Some(NativeType::Str),
+            "string" => Some(NativeType::Str),
+            "i32" => Some(NativeType::I32),
+            "int" => Some(NativeType::I32),
+            "int32" => Some(NativeType::I32),
+            "i64" => Some(NativeType::I64),
+            "int64" => Some(NativeType::I64),
+            "bool" => Some(NativeType::Bool),
+            "vec<u8>" => Some(NativeType::Bytes),
+            "bytes" => Some(NativeType::Bytes),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct JavaBinding {
+    name: String,
+    signature: NativeSignature,
+    class_name: String,
+}
+
+impl JavaBinding {
+    fn new(name: String, signature: NativeSignature, class_name: String) -> Self {
+        Self {
+            name,
+            signature,
+            class_name,
+        }
+    }
+
+    fn call(&self, _: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        let runtime = JavaRuntime::instance()?;
+        runtime.call_static_method(&self.class_name, &self.name, &self.signature, args)
+    }
+}
+
+struct PreparedArg {
+    arg: NativeArgValue,
+}
+
+impl PreparedArg {
+    fn prepare(args: &[Value], sig: &NativeSignature) -> RuntimeResult<Vec<Self>> {
+        if args.len() != sig.params.len() {
+            return Err(RuntimeError::new(format!(
+                "native function expects {} arguments, got {}",
+                sig.params.len(),
+                args.len()
+            )));
+        }
+        args.iter()
+            .zip(sig.params.iter())
+            .map(|(value, ty)| Self::from_value(value, *ty))
+            .collect()
+    }
+
+    fn from_value(value: &Value, ty: NativeType) -> RuntimeResult<Self> {
+        let arg = match (ty, value) {
+            (NativeType::Str, Value::String(s)) => {
+                let cstr = CString::new(s.as_str())
+                    .map_err(|_| RuntimeError::new("native string contains null byte"))?;
+                NativeArgValue::Str(cstr)
+            }
+            (NativeType::I32, Value::Int(i)) => {
+                let raw = i32::try_from(*i).map_err(|_| {
+                    RuntimeError::new("native i32 parameter overflows 32-bit range")
+                })?;
+                NativeArgValue::I32(raw)
+            }
+            (NativeType::I64, Value::Int(i)) => NativeArgValue::I64(*i),
+            (NativeType::Bool, Value::Bool(b)) => NativeArgValue::Bool(if *b { 1 } else { 0 }),
+            (NativeType::Bytes, _) => {
+                return Err(RuntimeError::new(
+                    "native function cannot accept byte arrays yet",
+                ));
+            }
+            _ => {
+                return Err(RuntimeError::new(format!(
+                    "expected native argument of type {:?}, got {}",
+                    ty,
+                    value.type_name()
+                )))
+            }
+        };
+        Ok(Self { arg })
+    }
+
+    fn as_ptr(&self) -> *const c_char {
+        match &self.arg {
+            NativeArgValue::Str(s) => s.as_ptr(),
+            _ => std::ptr::null(),
+        }
+    }
+
+    fn as_i32(&self) -> i32 {
+        match self.arg {
+            NativeArgValue::I32(v) => v,
+            NativeArgValue::Bool(v) => v,
+            _ => 0,
+        }
+    }
+
+    fn as_i64(&self) -> i64 {
+        match self.arg {
+            NativeArgValue::I64(v) => v,
+            NativeArgValue::I32(v) => v as i64,
+            _ => 0,
+        }
+    }
+}
+
+enum NativeArgValue {
+    Str(CString),
+    I32(i32),
+    I64(i64),
+    Bool(i32),
+}
 
 #[derive(Clone, Debug)]
 struct Env(Rc<RefCell<EnvData>>);
@@ -687,6 +974,8 @@ pub enum Value {
     Function(UserFunction),
     Builtin(BuiltinFn),
     Module(ModuleValue),
+    Native(NativeBinding),
+    Java(JavaBinding),
 }
 
 #[derive(Clone, Debug)]
@@ -1210,6 +1499,8 @@ impl fmt::Debug for Value {
             Value::Function(func) => write!(f, "<fn {}>", func.name),
             Value::Builtin(_) => write!(f, "<builtin>"),
             Value::Module(m) => write!(f, "<module {}>", m.name),
+            Value::Native(binding) => write!(f, "<native {}>", binding.name),
+            Value::Java(binding) => write!(f, "<java {}>", binding.name),
         }
     }
 }
@@ -1235,6 +1526,8 @@ impl Value {
             Value::Function(_) => "function",
             Value::Builtin(_) => "builtin",
             Value::Module(_) => "module",
+            Value::Native(_) => "native",
+            Value::Java(_) => "java",
         }
     }
 
@@ -1250,7 +1543,12 @@ impl Value {
             Value::Set(set) => !set.borrow().is_empty(),
             Value::Result(res) => matches!(res, ResultValue::Ok { .. }),
             Value::Option(opt) => matches!(opt, OptionValue::Some { .. }),
-            Value::Future(_) | Value::Function(_) | Value::Builtin(_) | Value::Module(_) => true,
+            Value::Future(_)
+            | Value::Function(_)
+            | Value::Builtin(_)
+            | Value::Module(_)
+            | Value::Native(_) => true,
+            Value::Java(_) => true,
             Value::Struct(_) => true,
             Value::Enum(_) => true,
             Value::Tuple(t) => !t.is_empty(),
@@ -1346,6 +1644,8 @@ impl Value {
             Value::Function(func) => format!("<fn {}>", func.name),
             Value::Builtin(_) => "<builtin>".to_string(),
             Value::Module(m) => format!("<module {}>", m.name),
+            Value::Native(binding) => format!("<native {}>", binding.name),
+            Value::Java(binding) => format!("<java {}>", binding.name),
         }
     }
 }
@@ -1390,6 +1690,9 @@ impl Interpreter {
     pub fn with_module_loader(module_loader: ModuleLoader) -> Self {
         let env = Env::new();
         register_builtins(&env);
+        if let Err(err) = JavaRuntime::initialize(&module_loader.java_jars()) {
+            eprintln!("[java] failed to initialize JVM: {err}");
+        }
         eprintln!("[interp] created");
         Self {
             globals: env,
@@ -1491,16 +1794,49 @@ impl Interpreter {
         if let Some(module) = self.modules.get(name) {
             return Ok(module.clone());
         }
-        let loaded = self
-            .module_loader
-            .load_module(name)
-            .map_err(|err| RuntimeError::new(format!("failed to load module `{name}`: {err}")))?;
-        let module_env = self.globals.child();
-        self.bind_imports(&loaded.ast.imports, &module_env)?;
-        let fields = self.load_functions_into_env(&module_env, &loaded.ast)?;
-        let module_value = ModuleValue {
-            name: loaded.name.clone(),
-            fields,
+        let module_value = match self.module_loader.load_module(name) {
+            Ok(loaded) => {
+                let module_env = self.globals.child();
+                self.bind_imports(&loaded.ast.imports, &module_env)?;
+                let fields = self.load_functions_into_env(&module_env, &loaded.ast)?;
+                ModuleValue {
+                    name: loaded.name.clone(),
+                    fields,
+                }
+            }
+            Err(err) => {
+                if let Some(meta) = self.module_loader.exports_for(name) {
+                    let mut module_fields = HashMap::new();
+                    let mut loaded = false;
+                    if let Some(lib_path) = &meta.native_lib {
+                        if let Ok(fields) = self.native_fields_from_meta(meta, lib_path) {
+                            loaded = true;
+                            module_fields.extend(fields);
+                        }
+                    }
+                    if let Some(java_path) = &meta.java_jar {
+                        if let Ok(fields) = self.java_fields_from_meta(meta, java_path) {
+                            loaded = true;
+                            module_fields.extend(fields);
+                        }
+                    }
+                    if loaded {
+                        ModuleValue {
+                            name: name.to_string(),
+                            fields: module_fields,
+                        }
+                    } else {
+                        ModuleValue {
+                            name: name.to_string(),
+                            fields: Self::stub_fields_from_exports(&meta.schema),
+                        }
+                    }
+                } else {
+                    return Err(RuntimeError::new(format!(
+                        "failed to load module `{name}`: {err}"
+                    )));
+                }
+            }
         };
         self.modules.insert(name.to_string(), module_value.clone());
         Ok(module_value)
@@ -1524,6 +1860,109 @@ impl Interpreter {
             }
         }
         Some(current)
+    }
+
+    fn stub_fields_from_exports(schema: &ExportSchema) -> HashMap<String, Value> {
+        let mut fields = HashMap::new();
+        for export in &schema.exports {
+            if let Some(name) = &export.name {
+                fields.insert(name.clone(), Value::Builtin(Self::exports_not_implemented));
+            }
+        }
+        fields
+    }
+
+    fn native_fields_from_meta(
+        &self,
+        meta: &ExportMeta,
+        lib_path: &Path,
+    ) -> RuntimeResult<HashMap<String, Value>> {
+        let library = unsafe { Library::new(lib_path) }
+            .map_err(|err| RuntimeError::new(format!("native library load failed: {err}")))?;
+        let library = Rc::new(library);
+        let mut fields = HashMap::new();
+        for export in &meta.schema.exports {
+            if let (Some(name), Some(signature_text)) = (&export.name, export.signature.as_ref()) {
+                if let Some(signature) = NativeSignature::parse(signature_text) {
+                    if let Ok(symbol) = Self::load_native_symbol(&library, name) {
+                        let binding = NativeBinding::new(
+                            name.clone(),
+                            signature,
+                            symbol,
+                            Rc::clone(&library),
+                        );
+                        fields.insert(name.clone(), Value::Native(binding));
+                    }
+                }
+            }
+        }
+        if fields.is_empty() {
+            return Err(RuntimeError::new(format!(
+                "no native exports loaded for {}",
+                meta.schema.package
+            )));
+        }
+        Ok(fields)
+    }
+
+    fn java_fields_from_meta(
+        &self,
+        meta: &ExportMeta,
+        _jar_path: &Path,
+    ) -> RuntimeResult<HashMap<String, Value>> {
+        let _ = JavaRuntime::instance()?;
+        let mut fields = HashMap::new();
+        if !meta.schema.targets.iter().any(|t| t == "java") {
+            return Err(RuntimeError::new(format!(
+                "module {} does not expose Java exports",
+                meta.schema.package
+            )));
+        }
+        for export in &meta.schema.exports {
+            let name = match &export.name {
+                Some(value) => value.clone(),
+                None => continue,
+            };
+            let signature_text = match &export.signature {
+                Some(sig) => sig,
+                None => continue,
+            };
+            let signature = match NativeSignature::parse(signature_text) {
+                Some(sig) => sig,
+                None => continue,
+            };
+            let class_name = export
+                .java_class
+                .clone()
+                .unwrap_or_else(|| meta.schema.package.clone());
+            let binding = JavaBinding::new(name.clone(), signature, class_name);
+            fields.insert(name, Value::Java(binding));
+        }
+        if fields.is_empty() {
+            Err(RuntimeError::new(format!(
+                "no java exports loaded for {}",
+                meta.schema.package
+            )))
+        } else {
+            Ok(fields)
+        }
+    }
+
+    fn load_native_symbol(library: &Library, name: &str) -> RuntimeResult<*const c_void> {
+        let symbol_name =
+            CString::new(name).map_err(|_| RuntimeError::new("invalid native symbol name"))?;
+        unsafe {
+            let symbol: libloading::Symbol<*const c_void> = library
+                .get(symbol_name.as_bytes_with_nul())
+                .map_err(|err| {
+                    RuntimeError::new(format!("failed to load native symbol {name}: {err}"))
+                })?;
+            Ok(*symbol)
+        }
+    }
+
+    fn exports_not_implemented(_: &mut Interpreter, _: &[Value]) -> RuntimeResult<Value> {
+        Err(RuntimeError::new("FFI exports are not implemented yet"))
     }
 
     fn execute_block(&mut self, block: &Block, env: Env) -> RuntimeResult<ExecSignal> {
@@ -2206,6 +2645,22 @@ impl Interpreter {
                     ));
                 }
                 fun(self, &args)
+            }
+            Value::Native(binding) => {
+                if type_args.is_some() {
+                    return Err(RuntimeError::new(
+                        "type arguments are not supported on native functions",
+                    ));
+                }
+                binding.call(self, &args)
+            }
+            Value::Java(binding) => {
+                if type_args.is_some() {
+                    return Err(RuntimeError::new(
+                        "type arguments are not supported on java functions",
+                    ));
+                }
+                binding.call(self, &args)
             }
             other => Err(RuntimeError::new(format!(
                 "Attempted to call non-callable value: {other:?}"

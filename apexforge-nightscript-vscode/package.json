@@ -14,6 +14,10 @@
     "Snippets"
   ],
   "main": "./extension.js",
+  "scripts": {
+    "compile": "node ./node_modules/vscode/bin/compile",
+    "watch": "node ./node_modules/vscode/bin/compile -watch"
+  },
   "activationEvents": [
     "onLanguage:afml",
     "onCommand:apexforge.runApexrcCheck"

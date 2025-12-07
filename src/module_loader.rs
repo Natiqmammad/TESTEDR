@@ -1,12 +1,13 @@
+use anyhow::{anyhow, Context, Result};
+use blake3::Hasher;
+use dirs::home_dir;
+use serde::Deserialize;
+use serde_json;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
-use blake3::Hasher;
-use dirs::home_dir;
-
-use crate::{ast::File, lexer, parser};
+use crate::{ast::File, lexer, native, parser};
 
 #[derive(Clone, Debug)]
 pub struct Module {
@@ -21,6 +22,41 @@ pub struct ModuleLoader {
     search_paths: Vec<PathBuf>,
     cache_dir: PathBuf,
     modules: HashMap<String, Module>,
+    exports: HashMap<String, ExportMeta>,
+    java_jars: Vec<PathBuf>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ExportSchema {
+    pub package: String,
+    pub version: String,
+    pub targets: Vec<String>,
+    pub exports: Vec<ExportEntry>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ExportEntry {
+    pub name: Option<String>,
+    pub signature: Option<String>,
+    #[serde(rename = "type")]
+    pub type_name: Option<String>,
+    #[serde(default)]
+    pub fields: Vec<ExportField>,
+    #[serde(rename = "java_class")]
+    pub java_class: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ExportField {
+    pub name: String,
+    pub ty: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExportMeta {
+    pub schema: ExportSchema,
+    pub native_lib: Option<PathBuf>,
+    pub java_jar: Option<PathBuf>,
 }
 
 impl ModuleLoader {
@@ -108,12 +144,24 @@ impl ModuleLoader {
         let mut search_paths = Vec::new();
         search_paths.push(root.join("src"));
         search_paths.push(root.join("src").join("forge"));
-        add_vendor_paths(&mut search_paths, &root);
+        let mut exports = HashMap::new();
+        let mut java_jars = Vec::new();
+        add_vendor_paths(&mut search_paths, &root, &mut exports, &mut java_jars);
         Self {
             search_paths,
             cache_dir,
             modules: HashMap::new(),
+            exports,
+            java_jars,
         }
+    }
+
+    pub fn exports_for(&self, name: &str) -> Option<&ExportMeta> {
+        self.exports.get(name)
+    }
+
+    pub fn java_jars(&self) -> Vec<PathBuf> {
+        self.java_jars.clone()
     }
 }
 
@@ -159,6 +207,55 @@ fn apex_home() -> Result<PathBuf> {
     Ok(root)
 }
 
+fn load_exports(path: &Path, package_root: &Path) -> Option<ExportMeta> {
+    if !path.is_file() {
+        return None;
+    }
+    let text = fs::read_to_string(path).ok()?;
+    let schema: ExportSchema = serde_json::from_str(&text).ok()?;
+    let native_lib = find_native_lib(package_root);
+    let java_jar = find_java_jar(package_root);
+    Some(ExportMeta {
+        schema,
+        native_lib,
+        java_jar,
+    })
+}
+
+fn find_native_lib(package_root: &Path) -> Option<PathBuf> {
+    let triplet = native::host_triplet();
+    let lib_dir = package_root.join(".afml").join("lib").join(triplet);
+    if !lib_dir.is_dir() {
+        return None;
+    }
+    let expected_ext = native::dynamic_lib_extension();
+    for entry in fs::read_dir(lib_dir).ok()? {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if ext == expected_ext {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn find_java_jar(package_root: &Path) -> Option<PathBuf> {
+    let jar_dir = package_root.join(".afml").join("java");
+    if !jar_dir.is_dir() {
+        return None;
+    }
+    for entry in fs::read_dir(jar_dir).ok()? {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("jar") {
+            return Some(path);
+        }
+    }
+    None
+}
+
 fn package_dir(name: &str, version: &str) -> Result<PathBuf> {
     let dir = apex_home()?.join("packages").join(name).join(version);
     if dir.is_dir() {
@@ -170,7 +267,12 @@ fn package_dir(name: &str, version: &str) -> Result<PathBuf> {
     ))
 }
 
-fn add_vendor_paths(search_paths: &mut Vec<PathBuf>, root: &Path) {
+fn add_vendor_paths(
+    search_paths: &mut Vec<PathBuf>,
+    root: &Path,
+    exports: &mut HashMap<String, ExportMeta>,
+    java_jars: &mut Vec<PathBuf>,
+) {
     let vendor_root = root.join("target").join("vendor").join("afml");
     if let Ok(entries) = fs::read_dir(&vendor_root) {
         for entry in entries.flatten() {
@@ -178,6 +280,14 @@ fn add_vendor_paths(search_paths: &mut Vec<PathBuf>, root: &Path) {
             if path.is_dir() {
                 search_paths.push(path.clone());
                 search_paths.push(path.join("src"));
+                if let Some(meta) =
+                    load_exports(path.join(".afml").join("exports.json").as_path(), &path)
+                {
+                    if let Some(jar) = &meta.java_jar {
+                        java_jars.push(jar.clone());
+                    }
+                    exports.insert(meta.schema.package.clone(), meta);
+                }
             }
         }
     }
@@ -189,6 +299,14 @@ fn add_vendor_paths(search_paths: &mut Vec<PathBuf>, root: &Path) {
                     for ver in ver_entries.flatten() {
                         let path = ver.path();
                         search_paths.push(path.join("src"));
+                        if let Some(meta) =
+                            load_exports(path.join(".afml").join("exports.json").as_path(), &path)
+                        {
+                            if let Some(jar) = &meta.java_jar {
+                                java_jars.push(jar.clone());
+                            }
+                            exports.insert(meta.schema.package.clone(), meta);
+                        }
                     }
                 }
             }

@@ -51,6 +51,12 @@ pub struct RustTarget {
     pub lib_path: String,
     #[serde(default = "default_rust_build")]
     pub build: String,
+    #[serde(default = "default_rust_out_dir")]
+    pub out_dir: String,
+    #[serde(default)]
+    pub lib_name: Option<String>,
+    #[serde(default = "default_rust_abi")]
+    pub abi: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -62,6 +68,10 @@ pub struct JavaTarget {
     pub version: Option<String>,
     #[serde(default = "default_java_build")]
     pub build: String,
+    #[serde(default = "default_java_out_dir")]
+    pub out_dir: String,
+    #[serde(default)]
+    pub jar_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -169,10 +179,22 @@ fn default_rust_build() -> String {
     "cargo build --release".to_string()
 }
 
+fn default_rust_out_dir() -> String {
+    "target/release".to_string()
+}
+
+fn default_rust_abi() -> String {
+    "c".to_string()
+}
+
 fn default_java_gradle_path() -> String {
     "build.gradle".to_string()
 }
 
 fn default_java_build() -> String {
     "./gradlew jar".to_string()
+}
+
+fn default_java_out_dir() -> String {
+    "build/libs".to_string()
 }

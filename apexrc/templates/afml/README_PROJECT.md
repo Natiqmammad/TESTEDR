@@ -8,4 +8,9 @@ This project was scaffolded with `apexrc`. Common commands:
 - `apexrc clean` — delete local `target/` artifacts
 - `apexrc add forge.math` — add dependencies from the local `~/.apex` registry
 
+Generate export metadata before publishing:
+
+- Run `sdk/exports-gen --manifest Apex.toml --exports .afml/exports.toml --out .afml/exports.json`.
+- Include `.afml/exports.json` inside published packages so consumers know which symbols are available.
+
 All sources live under `src/`. The entry point is always `fun apex()` inside `src/main.afml`.

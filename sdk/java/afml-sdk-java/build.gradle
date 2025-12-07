@@ -1,0 +1,38 @@
+plugins {
+    id 'java'
+}
+
+group = 'org.apexforge'
+version = '0.1.0'
+
+repositories {
+    mavenCentral()
+}
+
+task generateAfmlExports {
+    description = 'Generates .afml/exports.json from @AfmlExport annotations'
+    doLast {
+        def annotations = []
+        fileTree('src/main/java').forEach { file ->
+            if (file.name.endsWith('.java')) {
+                def text = file.text
+                if (text.contains('@AfmlExport')) {
+                    annotations << file.name.replace('.java', '')
+                }
+            }
+        }
+        def exportsDir = file('.afml')
+        exportsDir.mkdirs()
+        def exportsFile = new File(exportsDir, 'exports.json')
+        exportsFile.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([
+            package: project.name,
+            version: project.version,
+            targets: ['java'],
+            exports: annotations.collect { [name: it.toLowerCase(), signature: "fn ${it.toLowerCase()}() -> str"] }
+        ]))
+    }
+}
+
+compileJava {
+    dependsOn(generateAfmlExports)
+}

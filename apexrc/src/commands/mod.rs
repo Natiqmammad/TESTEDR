@@ -2,6 +2,7 @@ pub mod build;
 pub mod check;
 pub mod clean;
 pub mod deps;
+pub mod doctor;
 pub mod init;
 pub mod install;
 pub mod login;

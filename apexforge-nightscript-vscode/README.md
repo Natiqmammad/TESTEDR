@@ -35,6 +35,10 @@ Completions include every forge primitive listed in the main README:
 
 If the check fails, you get both an inline error and the full CLI text to help triage issues before ever running `apexrc build`.
 
+### FFI exports awareness
+
+The extension also documents the `.afml/exports.json` workflow. `apexrc install` indexes the exports metadata into `target/vendor/.index.json`, and native libraries are placed under `.afml/lib/<triplet>/`. The runtime now loads Rust exports with `libloading` (with stub fallbacks when symbols are absent), and `apexrc doctor` surfaces any native loading problems before you run your app. The Diagnostics view keeps you aware of missing exports without running `apexrc run`.
+
 ## Getting Started
 
 1. Copy the `apexforge-nightscript-vscode` directory into your workspace.

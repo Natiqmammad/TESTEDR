@@ -1,0 +1,10 @@
+[targets]
+rust = true
+
+[[exports]]
+name = "greet"
+signature = "fn greet(str) -> str"
+
+[[exports]]
+name = "add"
+signature = "fn add(i32, i32) -> i32"

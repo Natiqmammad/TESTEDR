@@ -35,7 +35,7 @@ futures = "0.3"
 async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-jni = "0.21"
+jni = { version = "0.21", features = ["invocation"] }
 lazy_static = "1.4"
 glfw = { version = "0.55", optional = true }
 gl = { version = "0.14", optional = true }
@@ -56,6 +56,9 @@ sha2 = "0.10"
 semver = "1.0"
 indicatif = "0.17"
 hex = "0.4"
+exports-gen = { package = "exports-gen", path = "sdk/exports-gen" }
+[dev-dependencies]
+tempfile = "3.6"
 
 [features]
 default = []

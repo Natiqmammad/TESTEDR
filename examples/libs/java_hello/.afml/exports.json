@@ -1,0 +1,19 @@
+{
+  "package": "java_hello",
+  "version": "0.1.0",
+  "targets": [
+    "java"
+  ],
+  "exports": [
+    {
+      "name": "greet_java",
+      "signature": "fn greet_java() -> str",
+      "java_class": "com/apexforge/Hello"
+    },
+    {
+      "name": "sum",
+      "signature": "fn sum(i32, i32) -> i32",
+      "java_class": "com/apexforge/Hello"
+    }
+  ]
+}

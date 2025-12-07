@@ -98,3 +98,25 @@ fn is_safe_entry_path(path: &Path) -> bool {
     }
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn exports_json_preserved() -> Result<(), anyhow::Error> {
+        let dir = tempdir()?;
+        let root = dir.path();
+        let afml_dir = root.join(".afml");
+        fs::create_dir_all(&afml_dir)?;
+        let exports = afml_dir.join("exports.json");
+        fs::write(&exports, r#"{"package":"demo"}"#)?;
+
+        let archive = create_archive(&root)?;
+        let extract_dir = tempdir()?;
+        extract_archive(&archive, extract_dir.path())?;
+        assert!(extract_dir.path().join(".afml/exports.json").exists());
+        Ok(())
+    }
+}

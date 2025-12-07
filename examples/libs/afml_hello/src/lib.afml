@@ -1,0 +1,6 @@
+import forge.log as log;
+
+fun hello(name:: str) -> str {
+    log.info("afml_hello invoked");
+    return name;
+}
