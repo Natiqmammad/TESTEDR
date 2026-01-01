@@ -20,10 +20,7 @@ path = "apexrc/src/main.rs"
 name = "afns-lsp"
 path = "src/bin/lsp_server.rs"
 
-[[bin]]
-name = "flutter_host"
-path = "src/bin/flutter_host.rs"
-required-features = ["flutter_host_bin"]
+
 
 [dependencies]
 anyhow = "1.0"
@@ -65,7 +62,7 @@ default = []
 real_flutter_engine = []
 tokio = []
 rayon = []
-flutter_host_bin = ["dep:glfw", "dep:gl"]
+
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21", default-features = true }

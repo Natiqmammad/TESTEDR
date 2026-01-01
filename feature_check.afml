@@ -1,0 +1,23 @@
+
+import forge.log as log;
+
+struct Point {
+    x:: i32,
+    y:: i32,
+}
+
+fun apex() {
+    log.info("--- Testing Structs ---");
+    let p = Point { x: 10, y: 20 };
+    log.info("Point created. x:", p.x);
+
+    log.info("--- Testing For Loops ---");
+    let numbers = vec.new();
+    vec.push(numbers, 1);
+    vec.push(numbers, 2);
+    vec.push(numbers, 3);
+
+    for n in numbers {
+        log.info("Number:", n);
+    }
+}

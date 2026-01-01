@@ -32,10 +32,6 @@ pub mod android {
         Value::Null
     }
 }
-pub mod flutter;
-pub mod flutter_layers;
-pub mod flutter_scene;
-pub mod flutter_vm;
 mod forge;
 mod java_runtime;
 pub mod web;
@@ -2943,43 +2939,6 @@ fn register_builtins(env: &Env) {
     // Phase 4: Android Platform with JNI
     let android_module = android::create_android_module();
 
-    // Phase 4: Flutter Platform
-    let flutter_module = Value::Module(ModuleValue {
-        name: "flutter".to_string(),
-        fields: {
-            let mut map = HashMap::new();
-            map.insert(
-                "run_app".to_string(),
-                Value::Builtin(flutter_vm::builtin_flutter_run_app),
-            );
-            map.insert(
-                "build_widget".to_string(),
-                Value::Builtin(flutter_vm::builtin_flutter_build_widget),
-            );
-            map.insert(
-                "add_child".to_string(),
-                Value::Builtin(flutter_vm::builtin_flutter_add_child),
-            );
-            map.insert(
-                "render".to_string(),
-                Value::Builtin(flutter_vm::builtin_flutter_render),
-            );
-            map.insert(
-                "emit_event".to_string(),
-                Value::Builtin(flutter_vm::builtin_flutter_emit_event),
-            );
-            map.insert(
-                "window_metrics".to_string(),
-                Value::Builtin(flutter_vm::builtin_flutter_window_metrics),
-            );
-            map.insert(
-                "pointer_event".to_string(),
-                Value::Builtin(flutter_vm::builtin_flutter_pointer_event),
-            );
-            map
-        },
-    });
-
     // Phase 4: Web Platform
     let web_module = Value::Module(ModuleValue {
         name: "web".to_string(),
@@ -3007,7 +2966,7 @@ fn register_builtins(env: &Env) {
     env.define("set", set_module.clone());
     env.define("ui", ui_module.clone());
     env.define("android", android_module.clone());
-    env.define("flutter", flutter_module.clone());
+
     env.define("web", web_module.clone());
 
     let mut forge_fields = HashMap::new();
@@ -3022,7 +2981,7 @@ fn register_builtins(env: &Env) {
     forge_fields.insert("set".to_string(), set_module);
     forge_fields.insert("ui".to_string(), ui_module);
     forge_fields.insert("android".to_string(), android_module);
-    forge_fields.insert("flutter".to_string(), flutter_module);
+
     forge_fields.insert("web".to_string(), web_module);
     forge_fields.insert("panic".to_string(), panic_fn);
     forge_fields.insert("fs".to_string(), fs_module());
