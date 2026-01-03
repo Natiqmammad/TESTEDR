@@ -180,6 +180,7 @@ impl<'a> FnLower<'a> {
             .ty
             .as_ref()
             .map(ir_type_from_hint)
+            .or_else(|| self.infer_expr_type(&decl.value))
             .unwrap_or(IrType::I32);
         match decl.kind {
             VarKind::Let => {
@@ -845,16 +846,7 @@ impl<'a> FnLower<'a> {
                 ..
             } => {
                 if method == "info" && is_log_object(object) {
-                    if let Some(first) = args.first() {
-                        if let Expr::Literal(Literal::String { value, .. }) = first {
-                            let sid = self.builder.intern_string(value.clone());
-                            self.builder.emit(
-                                self.func_id,
-                                self.block_id,
-                                IrInstr::PrintStr { sid },
-                            );
-                        }
-                    }
+                    self.emit_log_info(args);
                 }
                 None
             }
@@ -907,6 +899,64 @@ impl<'a> FnLower<'a> {
             },
         );
         dst
+    }
+
+    fn emit_log_info(&mut self, args: &[Expr]) {
+        let mut first = true;
+        for arg in args {
+            if !first {
+                self.emit_print_literal(" ");
+            }
+            first = false;
+            if let Expr::Literal(Literal::String { value, .. }) = arg {
+                self.emit_print_literal(value);
+                continue;
+            }
+            if let Some((value, ty)) = self.lower_printable_value(arg) {
+                self.builder.emit(
+                    self.func_id,
+                    self.block_id,
+                    IrInstr::PrintValue { value, ty },
+                );
+            }
+        }
+        self.emit_print_literal("\n");
+    }
+
+    fn emit_print_literal(&mut self, text: &str) {
+        let sid = self.builder.intern_string(text.to_string());
+        self.builder
+            .emit(self.func_id, self.block_id, IrInstr::PrintStr { sid });
+    }
+
+    fn lower_printable_value(&mut self, expr: &Expr) -> Option<(u32, IrType)> {
+        let ty = self.infer_expr_type(expr)?;
+        let value = self.lower_expr(expr)?;
+        Some((value, ty))
+    }
+
+    fn infer_expr_type(&self, expr: &Expr) -> Option<IrType> {
+        match expr {
+            Expr::Literal(Literal::Integer { .. }) => Some(IrType::I32),
+            Expr::Literal(Literal::Bool { .. }) => Some(IrType::Bool),
+            Expr::Literal(Literal::String { .. }) => Some(IrType::Str),
+            Expr::Identifier { name, .. } => match self.env.get(name) {
+                Some(Binding::Value { ty, .. }) => Some(ty.clone()),
+                _ => None,
+            },
+            Expr::Binary { op, .. } => match op {
+                BinaryOp::Equal
+                | BinaryOp::NotEqual
+                | BinaryOp::Less
+                | BinaryOp::LessEqual
+                | BinaryOp::Greater
+                | BinaryOp::GreaterEqual
+                | BinaryOp::LogicalAnd
+                | BinaryOp::LogicalOr => Some(IrType::Bool),
+                _ => Some(IrType::I32),
+            },
+            _ => None,
+        }
     }
 
     fn read_binding(&mut self, name: &str) -> Option<u32> {
@@ -969,6 +1019,27 @@ fn is_log_object(expr: &Expr) -> bool {
 }
 
 fn ir_type_from_hint(_ty: &crate::ast::TypeExpr) -> IrType {
-    // Minimal mapping for now; extend as type checker lands.
-    IrType::I32
+    use crate::ast::TypeExpr;
+
+    match _ty {
+        TypeExpr::Named(named) => {
+            let last = named.segments.last().map(|s| s.name.as_str());
+            match last {
+                Some("str") | Some("string") => IrType::Str,
+                Some("bool") => IrType::Bool,
+                Some("i8")
+                | Some("i16")
+                | Some("i32")
+                | Some("i64")
+                | Some("i128")
+                | Some("u8")
+                | Some("u16")
+                | Some("u32")
+                | Some("u64")
+                | Some("u128") => IrType::I32,
+                _ => IrType::I32,
+            }
+        }
+        _ => IrType::I32,
+    }
 }

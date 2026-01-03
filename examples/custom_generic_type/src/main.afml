@@ -1,15 +1,45 @@
-import forge;
 import forge.log as log;
 
-struct User { id:: i32, name:: str }
+struct ApiResponse<T> {
+    data:: option<T>,
+    status:: str,
+}
 
-fun echo<T>(value:: T) -> T {
-    log.info("Value:", value);
-    return value;
+enum Payload<T> {
+    Data(value:: T),
+    Empty,
+}
+
+fun wrap_value<T>(value:: T) -> ApiResponse<T> {
+    return ApiResponse<T> {
+        data: option.some(value),
+        status: "ok",
+    };
+}
+
+fun consume_payload<T>(payload:: Payload<T>) -> option<T> {
+    switch payload {
+        Data(val) -> option.some(val),
+        Empty -> option.none(),
+        _ -> option.none(),
+    }
 }
 
 fun apex() {
-    let user:: User = User { id:: 1, name:: "ApexForge" };
-    let mirrored:: User = echo<User>(user);
-    log.info("Final:", mirrored);
+    let response:: ApiResponse<str> = wrap_value<str>("NightScript");
+    log.info("API status:", response.status);
+    log.info("API data:", response.data);
+
+    let payload_number = Payload::Data<i32>(7);
+    let payload_text = Payload::Data<str>("async-ready");
+    let payload_empty = Payload::Empty<str>();
+
+    let picked:: option<str> = consume_payload<str>(payload_text);
+    log.info("Picked:", picked);
+
+    let fallback:: option<str> = consume_payload<str>(payload_empty);
+    log.info("Fallback:", fallback);
+
+    let number_value:: option<i32> = consume_payload<i32>(payload_number);
+    log.info("Number result:", number_value);
 }

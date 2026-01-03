@@ -2941,6 +2941,36 @@ fun apex() {
 }
 ```
 
+### 20.5 Generic Structs
+
+Structs can declare type parameters to reuse the same layout for multiple concrete types:
+
+```afml
+import forge.log as log;
+
+struct ApiResponse<T> {
+    data:: option<T>,
+    status:: str,
+}
+
+fun wrap<T>(value:: T) -> ApiResponse<T> {
+    return ApiResponse<T> {
+        data: option.some(value),
+        status: "ok",
+    };
+}
+
+fun apex() {
+    let response:: ApiResponse<str> = ApiResponse<str> {
+        data: option.some("NightScript"),
+        status: "ok",
+    };
+    log.info("Response:", response);
+}
+```
+
+> **Note:** Generic structs require explicit type arguments when instantiated. `ApiResponse<str> { ... }` ensures the runtime knows the concrete type stored inside `data`.
+
 ---
 
 ## 21. Enums
@@ -3066,6 +3096,38 @@ fun apex() {
         Failure(err) -> log.info("Error:", err),
         _ -> log.info("Unknown"),
     }
+}
+```
+
+### 21.5 Generic Enums
+
+Enums can also accept type parameters. Pass explicit type arguments to the variant constructor (even if the variant carries no payload) so the runtime can record the concrete type:
+
+```afml
+import forge.log as log;
+
+enum Payload<T> {
+    Data(value:: T),
+    Empty,
+}
+
+fun consume<T>(value:: Payload<T>) -> option<T> {
+    switch value {
+        Data(inner) -> return option.some(inner),
+        Empty -> return option.none(),
+        _ -> return option.none(),
+    }
+}
+
+fun apex() {
+    let text_payload = Payload::Data<str>("ready");
+    let empty_payload = Payload::Empty<str>();
+
+    let data:: option<str> = consume<str>(text_payload);
+    log.info("Data payload:", data);
+
+    let none:: option<str> = consume<str>(empty_payload);
+    log.info("Empty payload:", none);
 }
 ```
 

@@ -8,13 +8,13 @@ This extension delivers a first-class editing experience for ApexForge NightScri
 
 ## Features
 
-- **Syntax Highlighting** – Full TextMate grammar covering language keywords, async primitives, UI DSL calls (`ctx.text`, `ctx.button`, etc.), forge modules, and Flutter/engine APIs (SceneBuilder, FlutterEmbedder, PlatformChannel, ...).
-- **Language Configuration** – Comment toggles, bracket pairs, auto-closing quotes/braces, and indentation rules tuned to `fun`, `struct`, `impl`, `widget`, and SceneBuilder blocks.
-- **Snippets** – Quickly scaffold `fun`, `async fun`, `struct`, `impl`, UI layout blocks, async chaining (`async.then/.catch/.finally`), and SceneBuilder pipelines.
-- **Completions** – Inline IntelliSense suggestions for the full AFNS keyword set, async runtime helpers, forge modules, and engine identifiers referenced in `README.md`, `ROADMAP.md`, `FLUTTER_INTEGRATION_ROADMAP.md`, and `async_Readme.md`.
+- **Syntax Highlighting** – Full TextMate grammar covering language keywords, async primitives, UI DSL calls (`ctx.text`, `ctx.button`, etc.), forge modules, and web/TS+React integration hooks.
+- **Language Configuration** – Comment toggles, bracket pairs, auto-closing quotes/braces, and indentation rules tuned to `fun`, `struct`, `impl`, and UI layout blocks.
+- **Snippets** – Quickly scaffold `fun`, `async fun`, `struct`, `impl`, UI layout blocks, and async chaining (`async.then/.catch/.finally`).
+- **Completions** – Inline IntelliSense suggestions for the full AFNS keyword set, async runtime helpers, forge modules, and UI identifiers referenced in `README.md`, `ROADMAP.md`, and `async_Readme.md`.
 - **Icon** – Custom `.afml` document icon for quick recognition in the explorer.
 - **`apexrc check` Diagnostics** – The extension runs `apexrc check` automatically on file open/save (or via the **“ApexForge: Run apexrc check”** command) and surfaces parser/lexer errors inline through VS Code’s Problems panel. Diagnostics appear without having to build/run the project, similar to Rust Analyzer’s `cargo check`.
-- **Forge-aware snippets** – Templates and completions cover `forge.fs`, `forge.net`, `forge.db`, `forge.async`, `forge.log`, Flutter `ctx.*` widgets, and the generic helper patterns that ship in `examples/`.
+- **Forge-aware snippets** – Templates and completions cover `forge.fs`, `forge.net`, `forge.db`, `forge.async`, `forge.log`, `ctx.*` UI helpers, and the generic helper patterns that ship in `examples/`.
 
 ### Keyword coverage
 
@@ -23,7 +23,7 @@ Completions include every forge primitive listed in the main README:
 - `forge.fs`: `read_to_string`, `read_bytes`, `write_string`, `write_bytes`, `append_*`, `create_dir(_all)`, `remove_dir(_all)`, `copy_file`, `move`, `metadata`, `exists`, `is_file`, `is_dir`, `read_dir`, `ensure_dir`, `read_lines`, `write_lines`, `copy_dir_recursive`, `join`, `dirname`, `basename`, `extension`, `canonicalize`.
 - `forge.net`: `tcp_connect`, `tcp_listen`, `tcp_accept`, `tcp_send`, `tcp_recv`, `tcp_shutdown`, `tcp_set_nodelay`, timeout setters, `tcp_peer_addr`, `tcp_local_addr`, plus the full UDP family (`udp_bind`, `udp_send_to`, `udp_recv_from`, `udp_set_broadcast`, etc.) and cleanup helpers (`close_socket`, `close_listener`).
 - `forge.db`: `db.open`, `db.exec`, `db.query`, `db.begin`, `db.commit`, `db.rollback`, `db.get`, `db.set`, `db.del`, `db.close`.
-- `forge.async`/UI: all `async.*` helpers, `forge.log.*`, and `ctx.*` widget builders for Flutter-like layouts.
+- `forge.async`/UI: all `async.*` helpers, `forge.log.*`, and `ctx.*` UI builders for web-focused layouts.
 
 ### apexrc Integration
 

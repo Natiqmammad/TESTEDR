@@ -1,5 +1,7 @@
 # custom_generic_type
 
+Demonstrates defining and instantiating generic structs (`ApiResponse<T>`) and enums (`Payload<T>`) in ApexForge NightScript, including how to pass explicit type arguments for constructors.
+
 This project was scaffolded with `apexrc`. Common commands:
 
 - `apexrc build` — verify sources and emit native ELF at `target/x86_64/debug/custom_generic_type`

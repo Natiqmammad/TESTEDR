@@ -95,6 +95,9 @@ enum Command {
         release: bool,
         #[arg(long)]
         dump_ir: bool,
+        /// Launch with GUI native host for forge.gui.native applications
+        #[arg(long)]
+        ui: bool,
     },
     /// Check sources for parser/lexer errors
     Check {
@@ -237,6 +240,7 @@ fn main() -> Result<()> {
             target,
             release,
             dump_ir,
+            ui,
         }) => {
             let mut ctx = ProjectContext::load(manifest_path)?;
             install::install(&ctx, true, quiet)?;
@@ -246,7 +250,11 @@ fn main() -> Result<()> {
             } else {
                 build::BuildProfile::Debug
             };
-            run::run_project(&mut ctx, target, profile, dump_ir)?;
+            if ui {
+                run::run_project_with_ui(&mut ctx, target, profile, dump_ir)?;
+            } else {
+                run::run_project(&mut ctx, target, profile, dump_ir)?;
+            }
         }
         Some(Command::Check { manifest_path }) => {
             let ctx = ProjectContext::load(manifest_path)?;

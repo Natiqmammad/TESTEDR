@@ -371,6 +371,10 @@ pub enum IrInstr {
         dst: u32,
         len: u32,
     },
+    PrintValue {
+        value: u32,
+        ty: IrType,
+    },
 
     // SSA plumbing
     Phi {
@@ -459,7 +463,8 @@ impl IrInstr {
             | IrInstr::HeapFree { .. }
             | IrInstr::MemCopy { .. }
             | IrInstr::MemSet { .. }
-            | IrInstr::PrintStr { .. } => None,
+            | IrInstr::PrintStr { .. }
+            | IrInstr::PrintValue { .. } => None,
         }
     }
 }
@@ -800,6 +805,9 @@ impl<'a> fmt::Display for InstrFmt<'a> {
                     .map(|s| s.as_str())
                     .unwrap_or("");
                 write!(f, "print_str \"{}\"", text.escape_default())
+            }
+            IrInstr::PrintValue { value, ty } => {
+                write!(f, "print_val %{} {:?}", value, ty)
             }
         }
     }

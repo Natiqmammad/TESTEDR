@@ -51,6 +51,9 @@ pub fn lower_ir(module: &IrModule) -> Result<LoweredModule> {
                         increment_use(&mut uses, *src);
                         increment_use(&mut uses, *ptr);
                     }
+                    IrInstr::PrintValue { value, .. } => {
+                        increment_use(&mut uses, *value);
+                    }
                     _ => {}
                 }
             }

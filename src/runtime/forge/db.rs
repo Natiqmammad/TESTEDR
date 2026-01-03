@@ -134,172 +134,192 @@ fn build_exec_struct(rows: i64) -> Value {
     })
 }
 
-fn db_open(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    ensure_arity(args, 2, "db.open")?;
-    let backend = expect_string(&args[0])?;
-    let target = expect_string(&args[1])?;
+fn db_open(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        ensure_arity(&args, 2, "db.open")?;
+        let backend = expect_string(&args[0])?;
+        let target = expect_string(&args[1])?;
 
-    match backend.as_str() {
-        "sqlite" => {
-            let path = target.strip_prefix("sqlite:").unwrap_or(&target);
-            match Connection::open(path) {
-                Ok(conn) => {
+        match backend.as_str() {
+            "sqlite" => {
+                let path = target.strip_prefix("sqlite:").unwrap_or(&target).to_string();
+                match Connection::open(path) {
+                    Ok(conn) => {
+                        let id = next_conn_id();
+                        connections()
+                            .lock()
+                            .unwrap()
+                            .insert(id, DbBackend::Sqlite(SqliteConn { conn }));
+                        wrap_ok(build_conn_struct(id), Some(conn_tag()))
+                    }
+                    Err(e) => wrap_err(e.to_string(), Some(conn_tag())),
+                }
+            }
+            "postgres" => match PgClient::connect(target.as_str(), NoTls) {
+                Ok(client) => {
                     let id = next_conn_id();
                     connections()
                         .lock()
                         .unwrap()
-                        .insert(id, DbBackend::Sqlite(SqliteConn { conn }));
+                        .insert(id, DbBackend::Postgres(PostgresConn { client }));
                     wrap_ok(build_conn_struct(id), Some(conn_tag()))
                 }
                 Err(e) => wrap_err(e.to_string(), Some(conn_tag())),
-            }
-        }
-        "postgres" => match PgClient::connect(target.as_str(), NoTls) {
-            Ok(client) => {
-                let id = next_conn_id();
-                connections()
-                    .lock()
-                    .unwrap()
-                    .insert(id, DbBackend::Postgres(PostgresConn { client }));
-                wrap_ok(build_conn_struct(id), Some(conn_tag()))
-            }
-            Err(e) => wrap_err(e.to_string(), Some(conn_tag())),
-        },
-        "redis" => {
-            match redis::Client::open(target.as_str()).and_then(|client| client.get_connection()) {
-                Ok(conn) => {
-                    let id = next_conn_id();
-                    connections()
-                        .lock()
-                        .unwrap()
-                        .insert(id, DbBackend::Redis(RedisConn { conn }));
-                    wrap_ok(build_conn_struct(id), Some(conn_tag()))
+            },
+            "redis" => {
+                match redis::Client::open(target.as_str()).and_then(|client| client.get_connection()) {
+                    Ok(conn) => {
+                        let id = next_conn_id();
+                        connections()
+                            .lock()
+                            .unwrap()
+                            .insert(id, DbBackend::Redis(RedisConn { conn }));
+                        wrap_ok(build_conn_struct(id), Some(conn_tag()))
+                    }
+                    Err(e) => wrap_err(e.to_string(), Some(conn_tag())),
                 }
-                Err(e) => wrap_err(e.to_string(), Some(conn_tag())),
             }
+            other => wrap_err(
+                format!("db.open: backend `{other}` is not supported"),
+                Some(conn_tag()),
+            ),
         }
-        other => wrap_err(
-            format!("db.open: backend `{other}` is not supported"),
-            Some(conn_tag()),
-        ),
-    }
+    })
 }
 
-fn db_close(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    ensure_arity(args, 1, "db.close")?;
-    let id = expect_conn_id(&args[0])?;
-    connections().lock().unwrap().remove(&id);
-    wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new())))
+fn db_close(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        ensure_arity(&args, 1, "db.close")?;
+        let id = expect_conn_id(&args[0])?;
+        connections().lock().unwrap().remove(&id);
+        wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new())))
+    })
 }
 
-fn db_exec(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    ensure_arity(args, 2, "db.exec")?;
-    let id = expect_conn_id(&args[0])?;
-    let sql = expect_string(&args[1])?;
+fn db_exec(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        ensure_arity(&args, 2, "db.exec")?;
+        let id = expect_conn_id(&args[0])?;
+        let sql = expect_string(&args[1])?;
 
-    let mut guard = connections().lock().unwrap();
-    let backend = guard
-        .get_mut(&id)
-        .ok_or_else(|| RuntimeError::new("db.exec: invalid connection handle"))?;
-    let rows = backend.exec(&sql)?;
-    drop(guard);
-    wrap_ok(build_exec_struct(rows), Some(exec_tag()))
+        let mut guard = connections().lock().unwrap();
+        let backend = guard
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("db.exec: invalid connection handle"))?;
+        let rows = backend.exec(&sql)?;
+        drop(guard);
+        wrap_ok(build_exec_struct(rows), Some(exec_tag()))
+    })
 }
 
-fn db_query(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    ensure_arity(args, 2, "db.query")?;
-    let id = expect_conn_id(&args[0])?;
-    let sql = expect_string(&args[1])?;
+fn db_query(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        ensure_arity(&args, 2, "db.query")?;
+        let id = expect_conn_id(&args[0])?;
+        let sql = expect_string(&args[1])?;
 
-    let mut guard = connections().lock().unwrap();
-    let backend = guard
-        .get_mut(&id)
-        .ok_or_else(|| RuntimeError::new("db.query: invalid connection handle"))?;
-    let rows = backend.query(&sql)?;
-    drop(guard);
-    wrap_ok(rows, Some(sql_rows_tag()))
+        let mut guard = connections().lock().unwrap();
+        let backend = guard
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("db.query: invalid connection handle"))?;
+        let rows = backend.query(&sql)?;
+        drop(guard);
+        wrap_ok(rows, Some(sql_rows_tag()))
+    })
 }
 
-fn db_begin_tx(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    ensure_arity(args, 1, "db.begin")?;
-    let id = expect_conn_id(&args[0])?;
-    let mut guard = connections().lock().unwrap();
-    let backend = guard
-        .get_mut(&id)
-        .ok_or_else(|| RuntimeError::new("db.begin: invalid connection handle"))?;
-    backend.begin_tx()?;
-    drop(guard);
-    wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new())))
+fn db_begin_tx(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        ensure_arity(&args, 1, "db.begin")?;
+        let id = expect_conn_id(&args[0])?;
+        let mut guard = connections().lock().unwrap();
+        let backend = guard
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("db.begin: invalid connection handle"))?;
+        backend.begin_tx()?;
+        drop(guard);
+        wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new())))
+    })
 }
 
-fn db_commit_tx(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    ensure_arity(args, 1, "db.commit")?;
-    let id = expect_conn_id(&args[0])?;
-    let mut guard = connections().lock().unwrap();
-    let backend = guard
-        .get_mut(&id)
-        .ok_or_else(|| RuntimeError::new("db.commit: invalid connection handle"))?;
-    backend.commit_tx()?;
-    drop(guard);
-    wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new())))
+fn db_commit_tx(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        ensure_arity(&args, 1, "db.commit")?;
+        let id = expect_conn_id(&args[0])?;
+        let mut guard = connections().lock().unwrap();
+        let backend = guard
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("db.commit: invalid connection handle"))?;
+        backend.commit_tx()?;
+        drop(guard);
+        wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new())))
+    })
 }
 
-fn db_rollback_tx(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    ensure_arity(args, 1, "db.rollback")?;
-    let id = expect_conn_id(&args[0])?;
-    let mut guard = connections().lock().unwrap();
-    let backend = guard
-        .get_mut(&id)
-        .ok_or_else(|| RuntimeError::new("db.rollback: invalid connection handle"))?;
-    backend.rollback_tx()?;
-    drop(guard);
-    wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new())))
+fn db_rollback_tx(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        ensure_arity(&args, 1, "db.rollback")?;
+        let id = expect_conn_id(&args[0])?;
+        let mut guard = connections().lock().unwrap();
+        let backend = guard
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("db.rollback: invalid connection handle"))?;
+        backend.rollback_tx()?;
+        drop(guard);
+        wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new())))
+    })
 }
 
-fn db_get(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    ensure_arity(args, 2, "db.get")?;
-    let id = expect_conn_id(&args[0])?;
-    let key = expect_string(&args[1])?;
+fn db_get(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        ensure_arity(&args, 2, "db.get")?;
+        let id = expect_conn_id(&args[0])?;
+        let key = expect_string(&args[1])?;
 
-    let mut guard = connections().lock().unwrap();
-    let backend = guard
-        .get_mut(&id)
-        .ok_or_else(|| RuntimeError::new("db.get: invalid connection handle"))?;
-    let opt = backend.get(&key)?;
-    drop(guard);
-    wrap_ok(opt, Some(option_string_tag()))
+        let mut guard = connections().lock().unwrap();
+        let backend = guard
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("db.get: invalid connection handle"))?;
+        let opt = backend.get(&key)?;
+        drop(guard);
+        wrap_ok(opt, Some(option_string_tag()))
+    })
 }
 
-fn db_set(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    ensure_arity(args, 3, "db.set")?;
-    let id = expect_conn_id(&args[0])?;
-    let key = expect_string(&args[1])?;
-    let value_str = args[2].to_string_value();
+fn db_set(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        ensure_arity(&args, 3, "db.set")?;
+        let id = expect_conn_id(&args[0])?;
+        let key = expect_string(&args[1])?;
+        let value_str = args[2].to_string_value();
 
-    let mut guard = connections().lock().unwrap();
-    let backend = guard
-        .get_mut(&id)
-        .ok_or_else(|| RuntimeError::new("db.set: invalid connection handle"))?;
-    backend.set(&key, &value_str)?;
-    drop(guard);
-    wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new())))
+        let mut guard = connections().lock().unwrap();
+        let backend = guard
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("db.set: invalid connection handle"))?;
+        backend.set(&key, &value_str)?;
+        drop(guard);
+        wrap_ok(Value::Null, Some(TypeTag::Tuple(Vec::new())))
+    })
 }
 
-fn db_del(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    ensure_arity(args, 2, "db.del")?;
-    let id = expect_conn_id(&args[0])?;
-    let key = expect_string(&args[1])?;
+fn db_del(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        ensure_arity(&args, 2, "db.del")?;
+        let id = expect_conn_id(&args[0])?;
+        let key = expect_string(&args[1])?;
 
-    let mut guard = connections().lock().unwrap();
-    let backend = guard
-        .get_mut(&id)
-        .ok_or_else(|| RuntimeError::new("db.del: invalid connection handle"))?;
-    let deleted = backend.del(&key)?;
-    drop(guard);
-    wrap_ok(
-        Value::Int(i128::from(deleted)),
-        Some(TypeTag::Primitive(PrimitiveType::Int(IntType::I64))),
-    )
+        let mut guard = connections().lock().unwrap();
+        let backend = guard
+            .get_mut(&id)
+            .ok_or_else(|| RuntimeError::new("db.del: invalid connection handle"))?;
+        let deleted = backend.del(&key)?;
+        drop(guard);
+        wrap_ok(
+            Value::Int(i128::from(deleted)),
+            Some(TypeTag::Primitive(PrimitiveType::Int(IntType::I64))),
+        )
+    })
 }
 
 impl DbBackend {

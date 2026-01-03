@@ -263,8 +263,8 @@ Notes:
 - Vectors: `vec<T>` via `vec.new()`, `vec.push(v, x)`, `vec.len(v)`.
 - Sets: `set<T>` via `set.new()`, `set.insert/contains/len/union/intersection/to_vec`; element types currently `str/int/bool`.
 - Tuples: `tuple(str, i32)` literals like `(\"Alice\", 25)`; tuple indexing with `t[0]` works at runtime.
-- Structs: `struct User { name:: str }` literals `User { name: \"hi\" }`; methods via `impl User { fun greet(self) -> str { ... } }`.
-- Enums: `enum Status { Ok, Error(str) }` with constructors `Status::Ok` / `Status::Error(\"msg\")` and `switch` pattern bindings.
+- Structs: `struct User { name:: str }` literals `User { name: \"hi\" }`; methods via `impl User { fun greet(self) -> str { ... } }`. Generic structs look like `struct Box<T> { value:: T }` and require explicit instantiation such as `Box<str> { value: \"ok\" }`.
+- Enums: `enum Status { Ok, Error(str) }` with constructors `Status::Ok` / `Status::Error(\"msg\")` and `switch` pattern bindings. Generic enums add `<T>` and use constructors like `Payload::Data<str>(\"ready\")` or `Payload::Empty<str>()`.
 - Traits: `trait Display { fun to_string(self) -> str; }` + `impl Display for User { ... }`; call with `Display::to_string(u)`.
 - Option: `option.some(x)` / `option.none()` prints as `Some(...)` / `None`.
 - Result: `result.ok(v)` / `result.err(e)` prints as `Ok(...)` / `Err(...)`.
@@ -556,6 +556,7 @@ More examples in the [`examples/`](examples/) directory:
 
 - `examples/minimal_hello/` - Basic hello world
 - `examples/generics_basic/` - Generic functions and types
+- `examples/custom_generic_type/` - Generic structs and enums
 - `examples/fs_basic/` - Filesystem operations
 - `examples/db_sqlite/` - SQLite database
 - `examples/net_udp_loopback/` - UDP networking
@@ -651,6 +652,19 @@ enum Status {
     Ok,
     Error(msg:: str),
 }
+
+struct Box<T> {
+    value:: T,
+}
+
+enum Payload<T> {
+    Data(value:: T),
+    Empty,
+}
+
+let boxed:: Box<i32> = Box<i32> { value: 42 };
+let payload = Payload::Data<str>("ready");
+let empty = Payload::Empty<str>();
 ```
 
 ---

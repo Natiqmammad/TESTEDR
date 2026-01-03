@@ -6,10 +6,8 @@ const KEYWORDS = [
   'fun', 'async', 'await', 'let', 'var', 'return', 'if', 'else', 'while', 'for', 'switch',
   'try', 'catch', 'struct', 'enum', 'trait', 'impl', 'import', 'as', 'extern', 'unsafe', 'assembly',
   'slice', 'tuple', 'mut', 'widget', 'state', 'build', 'setState', 'apex',
-  'android', 'flutter', 'web', 'math', 'forge', 'log', 'result', 'option', 'vec', 'str', 'map', 'set',
-  'SceneBuilder', 'Layer', 'ContainerLayer', 'PictureLayer', 'TransformLayer', 'OpacityLayer', 'ClipLayer',
-  'FlutterEmbedder', 'FlutterEngine', 'Renderer', 'RenderContext', 'RenderLoop', 'Scene',
-  'PlatformChannel', 'MethodCall', 'MethodResponse', 'MethodError', 'BuildContext', 'RenderObject',
+  'android', 'react', 'web', 'math', 'forge', 'log', 'result', 'option', 'vec', 'str', 'map', 'set',
+  'MethodCall', 'MethodResponse', 'MethodError', 'BuildContext', 'RenderObject',
   'FutureHandle', 'FutureState', 'FutureKind', 'Executor', 'TaskGroup',
 
   // async

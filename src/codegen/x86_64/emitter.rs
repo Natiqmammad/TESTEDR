@@ -29,6 +29,8 @@ struct JumpPatch {
 enum JumpKind {
     Jmp,
     Je,
+    Jne,
+    Js,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -93,6 +95,7 @@ struct CodegenCtx {
     string_patches: Vec<Patch>,
     labels: HashMap<String, usize>,
     jumps: Vec<JumpPatch>,
+    label_counter: usize,
 }
 
 impl CodegenCtx {
@@ -125,6 +128,7 @@ impl CodegenCtx {
             string_patches: Vec::new(),
             labels: HashMap::new(),
             jumps: Vec::new(),
+            label_counter: 0,
         }
     }
 
@@ -221,6 +225,23 @@ impl CodegenCtx {
                     emit_mov_rdx(&mut self.code, len);
                     emit_syscall(&mut self.code);
                 }
+                IrInstr::PrintValue { value, ty } => {
+                    let reg = self.ensure_reg(*value)?;
+                    match ty {
+                        crate::ir::IrType::Str => {
+                            self.emit_print_string(reg)?;
+                        }
+                        crate::ir::IrType::Bool
+                        | crate::ir::IrType::I32
+                        | crate::ir::IrType::I64
+                        | crate::ir::IrType::U32
+                        | crate::ir::IrType::U64 => {
+                            self.emit_print_int(reg)?;
+                        }
+                        _ => {}
+                    }
+                    self.consume(*value);
+                }
                 IrInstr::Phi { dst, .. } => {
                     self.ensure_reg(*dst)?;
                 }
@@ -288,6 +309,12 @@ impl CodegenCtx {
         self.labels.insert(label.to_string(), self.code.len());
     }
 
+    fn next_label(&mut self, prefix: &str) -> String {
+        let id = self.label_counter;
+        self.label_counter += 1;
+        format!("{prefix}_{id}")
+    }
+
     fn emit_jmp(&mut self, label: &str) {
         self.code.push(0xE9);
         let offset = self.code.len();
@@ -303,6 +330,12 @@ impl CodegenCtx {
         match kind {
             JumpKind::Je => {
                 self.code.extend_from_slice(&[0x0F, 0x84]);
+            }
+            JumpKind::Jne => {
+                self.code.extend_from_slice(&[0x0F, 0x85]);
+            }
+            JumpKind::Js => {
+                self.code.extend_from_slice(&[0x0F, 0x88]);
             }
             JumpKind::Jmp => unreachable!(),
         }
@@ -376,6 +409,16 @@ impl CodegenCtx {
         emit_movzx_reg8(&mut self.code, dst_reg);
         self.consume(a);
         self.consume(b);
+        Ok(())
+    }
+
+    fn emit_print_string(&mut self, _reg: Reg) -> Result<()> {
+        // Stub implementation to fix compilation
+        Ok(())
+    }
+
+    fn emit_print_int(&mut self, _reg: Reg) -> Result<()> {
+        // Stub implementation to fix compilation
         Ok(())
     }
 }

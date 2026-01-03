@@ -10,7 +10,6 @@
     { "include": "#types" },
     { "include": "#uiDsl" },
     { "include": "#asyncApis" },
-    { "include": "#engineApis" },
     { "include": "#modulePaths" },
     { "include": "#functions" }
   ],
@@ -102,19 +101,11 @@
         }
       ]
     },
-    "engineApis": {
-      "patterns": [
-        {
-          "name": "support.function.engine.afml",
-          "match": "\\b(FlutterEmbedder|FlutterEngine|SceneBuilder|Renderer|RenderLoop|MethodCall|MethodResponse|MethodChannel|WindowMetrics|PointerEvent|PlatformMessage|FlutterEngineRun|FlutterEngineCreateAOTData|FlutterEngineShutdown)\\b"
-        }
-      ]
-    },
     "modulePaths": {
       "patterns": [
         {
           "name": "support.namespace.afml",
-          "match": "\\b((forge|android|flutter|web|math|log|async|vec|str|map|set)(\\.[A-Za-z_][\\w]*)+)\\b"
+          "match": "\\b((forge|android|react|web|math|log|async|vec|str|map|set)(\\.[A-Za-z_][\\w]*)+)\\b"
         }
       ]
     },

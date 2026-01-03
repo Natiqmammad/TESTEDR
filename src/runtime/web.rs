@@ -1,6 +1,5 @@
-// Phase 4: Web Server Support
-// This module provides HTTP server stubs for web platform
 
+use futures::future::{BoxFuture, LocalBoxFuture};
 use crate::runtime::{Interpreter, MapValue, RuntimeError, RuntimeResult, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -104,161 +103,181 @@ impl WebServer {
 }
 
 /// Builtin web functions
-pub fn builtin_web_listen(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "web.listen expects host and port arguments",
-        ));
-    }
-
-    let host = match &args[0] {
-        Value::String(h) => h.clone(),
-        _ => return Err(RuntimeError::new("host must be string")),
-    };
-
-    let port = match &args[1] {
-        Value::Int(p) => *p as u16,
-        _ => return Err(RuntimeError::new("port must be integer")),
-    };
-
-    println!("[WEB] Listening on {}:{}", host, port);
-    Ok(Value::String(format!(
-        "Server listening on {}:{}",
-        host, port
-    )))
-}
-
-pub fn builtin_web_route(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "web.route expects path and handler arguments",
-        ));
-    }
-
-    let path = match &args[0] {
-        Value::String(p) => p.clone(),
-        _ => return Err(RuntimeError::new("path must be string")),
-    };
-
-    println!("[WEB] Route registered: {}", path);
-    Ok(Value::String(format!("Route {} registered", path)))
-}
-
-pub fn builtin_web_serve(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    if args.is_empty() {
-        return Err(RuntimeError::new("web.serve expects file path argument"));
-    }
-
-    match &args[0] {
-        Value::String(path) => {
-            println!("[WEB] Serving static files from: {}", path);
-            Ok(Value::String(format!("Serving files from {}", path)))
+pub fn builtin_web_listen(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        if args.len() < 2 {
+            return Err(RuntimeError::new(
+                "web.listen expects host and port arguments",
+            ));
         }
-        _ => Err(RuntimeError::new("path must be string")),
-    }
+
+        let host = match &args[0] {
+            Value::String(h) => h.clone(),
+            _ => return Err(RuntimeError::new("host must be string")),
+        };
+
+        let port = match &args[1] {
+            Value::Int(p) => *p as u16,
+            _ => return Err(RuntimeError::new("port must be integer")),
+        };
+
+        println!("[WEB] Listening on {}:{}", host, port);
+        Ok(Value::String(format!(
+            "Server listening on {}:{}",
+            host, port
+        )))
+    })
+}
+
+pub fn builtin_web_route(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        if args.len() < 2 {
+            return Err(RuntimeError::new(
+                "web.route expects path and handler arguments",
+            ));
+        }
+
+        let path = match &args[0] {
+            Value::String(p) => p.clone(),
+            _ => return Err(RuntimeError::new("path must be string")),
+        };
+
+        println!("[WEB] Route registered: {}", path);
+        Ok(Value::String(format!("Route {} registered", path)))
+    })
+}
+
+pub fn builtin_web_serve(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        if args.is_empty() {
+            return Err(RuntimeError::new("web.serve expects file path argument"));
+        }
+
+        match &args[0] {
+            Value::String(path) => {
+                println!("[WEB] Serving static files from: {}", path);
+                Ok(Value::String(format!("Serving files from {}", path)))
+            }
+            _ => Err(RuntimeError::new("path must be string")),
+        }
+    })
 }
 
 pub fn builtin_web_request_method(
-    _interp: &mut Interpreter,
-    args: &[Value],
-) -> RuntimeResult<Value> {
-    if args.is_empty() {
-        return Err(RuntimeError::new("request.method expects request argument"));
-    }
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        if args.is_empty() {
+            return Err(RuntimeError::new("request.method expects request argument"));
+        }
 
-    println!("[WEB] Getting request method");
-    Ok(Value::String("GET".to_string()))
+        println!("[WEB] Getting request method");
+        Ok(Value::String("GET".to_string()))
+    })
 }
 
-pub fn builtin_web_request_path(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    if args.is_empty() {
-        return Err(RuntimeError::new("request.path expects request argument"));
-    }
+pub fn builtin_web_request_path(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        if args.is_empty() {
+            return Err(RuntimeError::new("request.path expects request argument"));
+        }
 
-    println!("[WEB] Getting request path");
-    Ok(Value::String("/api/data".to_string()))
+        println!("[WEB] Getting request path");
+        Ok(Value::String("/api/data".to_string()))
+    })
 }
 
 pub fn builtin_web_request_headers(
-    _interp: &mut Interpreter,
-    args: &[Value],
-) -> RuntimeResult<Value> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "request.headers expects request argument",
-        ));
-    }
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        if args.is_empty() {
+            return Err(RuntimeError::new(
+                "request.headers expects request argument",
+            ));
+        }
 
-    println!("[WEB] Getting request headers");
-    Ok(Value::Map(Rc::new(RefCell::new(MapValue {
-        key_type: None,
-        value_type: None,
-        entries: HashMap::new(),
-    }))))
+        println!("[WEB] Getting request headers");
+        Ok(Value::Map(Rc::new(RefCell::new(MapValue {
+            key_type: None,
+            value_type: None,
+            entries: HashMap::new(),
+        }))))
+    })
 }
 
-pub fn builtin_web_request_body(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    if args.is_empty() {
-        return Err(RuntimeError::new("request.body expects request argument"));
-    }
+pub fn builtin_web_request_body(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        if args.is_empty() {
+            return Err(RuntimeError::new("request.body expects request argument"));
+        }
 
-    println!("[WEB] Getting request body");
-    Ok(Value::String(String::new()))
+        println!("[WEB] Getting request body");
+        Ok(Value::String(String::new()))
+    })
 }
 
 pub fn builtin_web_response_status(
-    _interp: &mut Interpreter,
-    args: &[Value],
-) -> RuntimeResult<Value> {
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "response.status expects response and status arguments",
-        ));
-    }
-
-    match &args[1] {
-        Value::Int(status) => {
-            println!("[WEB] Setting response status: {}", status);
-            Ok(Value::Null)
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        if args.len() < 2 {
+            return Err(RuntimeError::new(
+                "response.status expects response and status arguments",
+            ));
         }
-        _ => Err(RuntimeError::new("status must be integer")),
-    }
+
+        match &args[1] {
+            Value::Int(status) => {
+                println!("[WEB] Setting response status: {}", status);
+                Ok(Value::Null)
+            }
+            _ => Err(RuntimeError::new("status must be integer")),
+        }
+    })
 }
 
 pub fn builtin_web_response_set_header(
-    _interp: &mut Interpreter,
-    args: &[Value],
-) -> RuntimeResult<Value> {
-    if args.len() < 3 {
-        return Err(RuntimeError::new(
-            "response.set_header expects response, key, and value arguments",
-        ));
-    }
-
-    match (&args[1], &args[2]) {
-        (Value::String(key), Value::String(value)) => {
-            println!("[WEB] Setting header: {} = {}", key, value);
-            Ok(Value::Null)
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        if args.len() < 3 {
+            return Err(RuntimeError::new(
+                "response.set_header expects response, key, and value arguments",
+            ));
         }
-        _ => Err(RuntimeError::new("key and value must be strings")),
-    }
+
+        match (&args[1], &args[2]) {
+            (Value::String(key), Value::String(value)) => {
+                println!("[WEB] Setting header: {} = {}", key, value);
+                Ok(Value::Null)
+            }
+            _ => Err(RuntimeError::new("key and value must be strings")),
+        }
+    })
 }
 
 pub fn builtin_web_response_send(
-    _interp: &mut Interpreter,
-    args: &[Value],
-) -> RuntimeResult<Value> {
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "response.send expects response and body arguments",
-        ));
-    }
-
-    match &args[1] {
-        Value::String(body) => {
-            println!("[WEB] Sending response: {}", body);
-            Ok(Value::Null)
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        if args.len() < 2 {
+            return Err(RuntimeError::new(
+                "response.send expects response and body arguments",
+            ));
         }
-        _ => Err(RuntimeError::new("body must be string")),
-    }
+
+        match &args[1] {
+            Value::String(body) => {
+                println!("[WEB] Sending response: {}", body);
+                Ok(Value::Null)
+            }
+            _ => Err(RuntimeError::new("body must be string")),
+        }
+    })
 }
