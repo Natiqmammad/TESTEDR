@@ -8,6 +8,7 @@ mod parser;
 mod runtime;
 mod span;
 mod token;
+mod validation;
 
 // Include Android library when building for Android
 #[cfg(target_os = "android")]
@@ -43,15 +44,16 @@ struct Cli {
 fn main() -> anyhow::Result<()> {
     eprintln!("[main] start");
     let cli = Cli::parse();
-    let source = read_source(cli.input.as_deref())?;
+    let input = read_source(cli.input.as_deref())?;
+    let source = &input.source;
     eprintln!("[main] source loaded ({} bytes)", source.len());
 
     eprintln!("[main] lex start");
-    let tokens = match lexer::lex(&source) {
+    let tokens = match lexer::lex(source) {
         Ok(tokens) => tokens,
         Err(err) => {
             let error = diagnostics::AfnsError::from(err);
-            diagnostics::print_error(&source, &error);
+            diagnostics::print_error(source, &error);
             return Ok(());
         }
     };
@@ -66,13 +68,23 @@ fn main() -> anyhow::Result<()> {
     let should_parse = cli.ast || cli.run || !cli.tokens;
     if should_parse {
         eprintln!("[main] parse start");
-        let ast = match parser::parse_tokens(&source, tokens.clone()) {
-            Ok(ast) => ast,
-            Err(err) => {
-                diagnostics::print_error(&source, &err);
-                return Ok(());
+        let report = parser::parse_tokens_with_diagnostics(source, tokens.clone());
+        if !report.errors.is_empty() {
+            for err in report.errors {
+                let error = diagnostics::AfnsError::from(err);
+                diagnostics::print_error(source, &error);
             }
-        };
+            return Ok(());
+        }
+        let validation_errors = validation::validate_file(&report.file);
+        if !validation_errors.is_empty() {
+            for err in validation_errors {
+                let msg = diagnostics::format_diagnostic(source, Some(err.span), &err.message);
+                eprintln!("{msg}");
+            }
+            return Ok(());
+        }
+        let ast = report.file;
         eprintln!("[main] parse complete");
         if cli.ast {
             println!("-- ast --");
@@ -86,10 +98,13 @@ fn main() -> anyhow::Result<()> {
         }
 
         if cli.run {
-            let mut interpreter = runtime::Interpreter::new();
+            let module_loader = module_loader::ModuleLoader::with_root(input.root.clone());
+            let mut interpreter = runtime::Interpreter::with_module_loader(module_loader);
             eprintln!("[main] interpreter created, running apex");
             if let Err(err) = interpreter.run(&ast) {
-                eprintln!("runtime error: {err}");
+                let message = format!("runtime error: {}", err.message());
+                let formatted = diagnostics::format_diagnostic(source, err.span(), &message);
+                eprintln!("{formatted}");
                 return Ok(());
             }
         }
@@ -98,15 +113,46 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_source(path: Option<&Path>) -> anyhow::Result<String> {
+struct SourceInput {
+    source: String,
+    root: PathBuf,
+}
+
+fn read_source(path: Option<&Path>) -> anyhow::Result<SourceInput> {
     if let Some(path) = path {
-        fs::read_to_string(path)
-            .with_context(|| format!("failed to read source file {}", path.display()))
+        let resolved = if path.is_dir() {
+            path.join("src").join("main.afml")
+        } else {
+            path.to_path_buf()
+        };
+        let root = if resolved
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|name| name == "src")
+            .unwrap_or(false)
+        {
+            resolved
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::env::current_dir().unwrap())
+        } else {
+            resolved
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::env::current_dir().unwrap())
+        };
+        let source = fs::read_to_string(&resolved)
+            .with_context(|| format!("failed to read source file {}", resolved.display()))?;
+        Ok(SourceInput { source, root })
     } else {
         let mut buf = String::new();
         io::stdin()
             .read_to_string(&mut buf)
             .context("failed to read from stdin")?;
-        Ok(buf)
+        Ok(SourceInput {
+            source: buf,
+            root: std::env::current_dir()?,
+        })
     }
 }

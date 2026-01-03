@@ -1,0 +1,19 @@
+import forge.log as log;
+
+fun parse_int(s:: str) -> result<i32, str> {
+    // pretend parse works
+    if s == "" { return result.err("empty"); }
+    return result.ok(42);
+}
+
+fun greet(name:: option<str>) -> option<str> {
+    let n = name?;
+    return option.some("hi " + n);
+}
+
+fun apex() {
+    let num = parse_int("10")?;
+    log.info("num", num);
+    let msg = greet(option.some("Apex"))?;
+    log.info(msg);
+}

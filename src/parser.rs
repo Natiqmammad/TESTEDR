@@ -10,9 +10,29 @@ pub fn parse(source: &str) -> Result<File, AfnsError> {
     parse_tokens(source, tokens)
 }
 
+#[derive(Debug, Clone)]
+pub struct ParseReport {
+    pub file: File,
+    pub errors: Vec<ParseError>,
+}
+
+pub fn parse_with_diagnostics(source: &str) -> Result<ParseReport, AfnsError> {
+    let tokens = lexer::lex(source)?;
+    Ok(parse_tokens_with_diagnostics(source, tokens))
+}
+
 pub fn parse_tokens(source: &str, tokens: Vec<Token>) -> Result<File, AfnsError> {
+    let report = parse_tokens_with_diagnostics(source, tokens);
+    if let Some(err) = report.errors.first().cloned() {
+        Err(AfnsError::from(err))
+    } else {
+        Ok(report.file)
+    }
+}
+
+pub fn parse_tokens_with_diagnostics(source: &str, tokens: Vec<Token>) -> ParseReport {
     let parser = Parser::new(source, tokens);
-    parser.parse().map_err(AfnsError::from)
+    parser.parse_with_diagnostics()
 }
 
 struct Parser<'a> {
@@ -32,7 +52,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse(mut self) -> Result<File, ParseError> {
+    fn parse_with_diagnostics(mut self) -> ParseReport {
         let mut imports = Vec::new();
         while self.check_keyword(Keyword::Import) {
             match self.parse_import() {
@@ -65,10 +85,6 @@ impl<'a> Parser<'a> {
             }
         }
 
-        if let Some(err) = self.errors.first().cloned() {
-            return Err(err);
-        }
-
         let span = if let Some(first) = self
             .tokens
             .iter()
@@ -85,21 +101,53 @@ impl<'a> Parser<'a> {
             Span::new(0, 0, 1, 1)
         };
 
-        Ok(File {
+        let file = File {
             imports,
             items,
             span,
-        })
+        };
+        ParseReport {
+            file,
+            errors: self.errors,
+        }
     }
 
     fn parse_import(&mut self) -> Result<Import, ParseError> {
         let start = self.expect_keyword(Keyword::Import)?.span;
         let (first, mut span) = self.expect_name("import path")?;
         let mut path = vec![first];
-        while self.match_with(|k| matches!(k, TokenKind::ColonColon | TokenKind::Dot)) {
-            let (segment, seg_span) = self.expect_name("import path segment")?;
+        let mut member = None;
+        let mut seen_dot = false;
+        loop {
+            if self.match_with(|k| matches!(k, TokenKind::Dot)) {
+                let (segment, seg_span) = self.expect_name("import path segment")?;
+                span = span.merge(seg_span);
+                path.push(segment);
+                seen_dot = true;
+                continue;
+            }
+            if self.match_with(|k| matches!(k, TokenKind::ColonColon)) {
+                let (segment, seg_span) = self.expect_name("import path segment")?;
+                span = span.merge(seg_span);
+                // If we already saw a dot separator and the next token ends the import,
+                // treat this as a member import; otherwise, keep extending the path.
+                if seen_dot
+                    && (self.check(|k| matches!(k, TokenKind::Semicolon))
+                        || self.check_keyword(Keyword::As))
+                {
+                    member = Some(segment);
+                    break;
+                } else {
+                    path.push(segment);
+                    continue;
+                }
+            }
+            break;
+        }
+        if member.is_none() && self.match_with(|k| matches!(k, TokenKind::ColonColon)) {
+            let (segment, seg_span) = self.expect_name("import member")?;
             span = span.merge(seg_span);
-            path.push(segment);
+            member = Some(segment);
         }
         let alias = if self.match_keyword(Keyword::As) {
             let (alias, alias_span) = self.expect_plain_identifier("import alias")?;
@@ -111,6 +159,7 @@ impl<'a> Parser<'a> {
         self.expect_with("';'", |k| matches!(k, TokenKind::Semicolon))?;
         Ok(Import {
             path,
+            member,
             alias,
             span: start.merge(span),
         })
@@ -424,7 +473,20 @@ impl<'a> Parser<'a> {
         let open = self.expect_with("'{'", |k| matches!(k, TokenKind::LeftBrace))?;
         let mut statements = Vec::new();
         while !self.check(|k| matches!(k, TokenKind::RightBrace)) {
-            statements.push(self.parse_statement()?);
+            // Allow harmless extra semicolons inside blocks.
+            if self.match_with(|k| matches!(k, TokenKind::Semicolon)) {
+                continue;
+            }
+            match self.parse_statement() {
+                Ok(stmt) => statements.push(stmt),
+                Err(err) => {
+                    self.record_error(err);
+                    self.synchronize_stmt();
+                }
+            }
+            if self.is_at_end() {
+                break;
+            }
         }
         let close = self.expect_with("'}'", |k| matches!(k, TokenKind::RightBrace))?;
         Ok(Block {
@@ -434,7 +496,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_statement(&mut self) -> Result<Stmt, ParseError> {
-        if self.check_keyword(Keyword::Let) || self.check_keyword(Keyword::Var) {
+        if self.check_keyword(Keyword::Let)
+            || self.check_keyword(Keyword::Var)
+            || self.check_keyword(Keyword::Const)
+        {
             self.parse_var_decl()
         } else if self.match_keyword(Keyword::Return) {
             let start = self.prev().span;
@@ -478,6 +543,18 @@ impl<'a> Parser<'a> {
             })
         } else if self.match_keyword(Keyword::Switch) {
             Ok(Stmt::Switch(self.parse_switch(self.prev().span)?))
+        } else if self.match_keyword(Keyword::Break) {
+            let start = self.prev().span;
+            let end = self
+                .expect_with("';'", |k| matches!(k, TokenKind::Semicolon))?
+                .span;
+            Ok(Stmt::Break(start.merge(end)))
+        } else if self.match_keyword(Keyword::Continue) {
+            let start = self.prev().span;
+            let end = self
+                .expect_with("';'", |k| matches!(k, TokenKind::Semicolon))?
+                .span;
+            Ok(Stmt::Continue(start.merge(end)))
         } else if self.match_keyword(Keyword::Try) {
             Ok(Stmt::Try(self.parse_try(self.prev().span)?))
         } else if self.match_keyword(Keyword::Unsafe) {
@@ -500,9 +577,11 @@ impl<'a> Parser<'a> {
     fn parse_var_decl(&mut self) -> Result<Stmt, ParseError> {
         let kind = if self.match_keyword(Keyword::Let) {
             VarKind::Let
-        } else {
-            self.expect_keyword(Keyword::Var)?;
+        } else if self.match_keyword(Keyword::Var) {
             VarKind::Var
+        } else {
+            self.expect_keyword(Keyword::Const)?;
+            VarKind::Const
         };
         let (name, name_span) = self.expect_identifier("variable name")?;
         let mut span = name_span;
@@ -606,6 +685,91 @@ impl<'a> Parser<'a> {
             catch_block,
             span,
         })
+    }
+
+    fn parse_check_expr(&mut self, start: Span) -> Result<Expr, ParseError> {
+        let target = if self.check(|k| matches!(k, TokenKind::LeftBrace)) {
+            None
+        } else {
+            Some(Box::new(self.parse_expression()?))
+        };
+        self.expect_with("'{'", |k| matches!(k, TokenKind::LeftBrace))?;
+        let mut arms = Vec::new();
+        while !self.check(|k| matches!(k, TokenKind::RightBrace)) {
+            let pattern = self.parse_check_pattern()?;
+            self.expect_with("'->'", |k| matches!(k, TokenKind::ThinArrow))?;
+            let expr = if self.check(|k| matches!(k, TokenKind::LeftBrace)) {
+                Expr::Block(self.parse_block()?)
+            } else {
+                self.parse_expression()?
+            };
+            let span = pattern.span().merge(expr.span());
+            arms.push(CheckArm {
+                pattern,
+                expr: Box::new(expr),
+                span,
+            });
+            if !self.match_with(|k| matches!(k, TokenKind::Comma)) {
+                break;
+            }
+        }
+        let end = self
+            .expect_with("'}'", |k| matches!(k, TokenKind::RightBrace))?
+            .span;
+        Ok(Expr::Check(CheckExpr {
+            target,
+            arms,
+            span: start.merge(end),
+        }))
+    }
+
+    fn parse_check_pattern(&mut self) -> Result<CheckPattern, ParseError> {
+        let token = self.peek().clone();
+        match &token.kind {
+            TokenKind::Identifier(name) if name == "_" => {
+                let token = self.advance();
+                Ok(CheckPattern::Wildcard { span: token.span })
+            }
+            TokenKind::IntegerLiteral(_) => {
+                if let Expr::Literal(lit) = self.parse_primary()? {
+                    Ok(CheckPattern::Literal(lit))
+                } else {
+                    unreachable!()
+                }
+            }
+            TokenKind::FloatLiteral(_) => {
+                if let Expr::Literal(lit) = self.parse_primary()? {
+                    Ok(CheckPattern::Literal(lit))
+                } else {
+                    unreachable!()
+                }
+            }
+            TokenKind::StringLiteral(_) => {
+                if let Expr::Literal(lit) = self.parse_primary()? {
+                    Ok(CheckPattern::Literal(lit))
+                } else {
+                    unreachable!()
+                }
+            }
+            TokenKind::CharLiteral(_) => {
+                if let Expr::Literal(lit) = self.parse_primary()? {
+                    Ok(CheckPattern::Literal(lit))
+                } else {
+                    unreachable!()
+                }
+            }
+            TokenKind::Keyword(Keyword::True) | TokenKind::Keyword(Keyword::False) => {
+                if let Expr::Literal(lit) = self.parse_primary()? {
+                    Ok(CheckPattern::Literal(lit))
+                } else {
+                    unreachable!()
+                }
+            }
+            _ => {
+                let guard = self.parse_expression()?;
+                Ok(CheckPattern::Guard(guard))
+            }
+        }
     }
 
     fn parse_assembly(&mut self) -> Result<Stmt, ParseError> {
@@ -965,6 +1129,16 @@ impl<'a> Parser<'a> {
                 };
                 continue;
             }
+            if self.match_keyword(Keyword::As) {
+                let ty = self.parse_type()?;
+                let span = expr.span().merge(ty.span());
+                expr = Expr::Cast {
+                    expr: Box::new(expr),
+                    ty,
+                    span,
+                };
+                continue;
+            }
             if self.match_with(|k| matches!(k, TokenKind::Dot | TokenKind::ColonColon)) {
                 let op_token = self.prev().clone();
                 let (member, member_span) = self.expect_identifier("member name")?;
@@ -1088,6 +1262,10 @@ impl<'a> Parser<'a> {
                     span: token.span,
                 }))
             }
+            TokenKind::Keyword(Keyword::Check) => {
+                let start = self.advance().span;
+                self.parse_check_expr(start)
+            }
             TokenKind::Keyword(Keyword::If) => {
                 let start = self.advance().span;
                 let if_stmt = self.parse_if(start)?;
@@ -1117,10 +1295,25 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::LeftParen => {
-                self.advance();
-                let expr = self.parse_expression()?;
-                self.expect_with("')'", |k| matches!(k, TokenKind::RightParen))?;
-                Ok(expr)
+                let open = self.advance().span;
+                let first = self.parse_expression()?;
+                if self.match_with(|k| matches!(k, TokenKind::Comma)) {
+                    let mut elements = vec![first];
+                    loop {
+                        elements.push(self.parse_expression()?);
+                        if !self.match_with(|k| matches!(k, TokenKind::Comma)) {
+                            break;
+                        }
+                    }
+                    let close = self.expect_with("')'", |k| matches!(k, TokenKind::RightParen))?;
+                    Ok(Expr::TupleLiteral {
+                        elements,
+                        span: open.merge(close.span),
+                    })
+                } else {
+                    self.expect_with("')'", |k| matches!(k, TokenKind::RightParen))?;
+                    Ok(first)
+                }
             }
             TokenKind::LeftBracket => {
                 let start = self.advance().span;
@@ -1516,7 +1709,6 @@ impl<'a> Parser<'a> {
             (Some(TokenKind::Identifier(_)), Some(TokenKind::Colon | TokenKind::ColonColon)) => {
                 true
             }
-            (Some(TokenKind::RightBrace), _) => true,
             _ => false,
         }
     }
@@ -1556,6 +1748,27 @@ impl<'a> Parser<'a> {
                 | TokenKind::Keyword(Keyword::Fun)
                 | TokenKind::Keyword(Keyword::Async)
                 | TokenKind::Keyword(Keyword::Import) => return,
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+    }
+
+    fn synchronize_stmt(&mut self) {
+        while !self.is_at_end() {
+            if matches!(
+                self.prev().kind,
+                TokenKind::Semicolon | TokenKind::RightBrace
+            ) {
+                return;
+            }
+            match self.peek().kind {
+                TokenKind::Semicolon => {
+                    self.advance();
+                    return;
+                }
+                TokenKind::RightBrace => return,
                 _ => {
                     self.advance();
                 }

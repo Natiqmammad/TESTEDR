@@ -1,0 +1,15 @@
+import forge.log as log;
+
+fun apex() {
+    let score = 72;
+
+    if score >= 90 {
+        log.info("Grade: A");
+    } else if score >= 80 {
+        log.info("Grade: B");
+    } else if score >= 70 {
+        log.info("Grade: C");
+    } else {
+        log.info("Grade: D or below");
+    }
+}

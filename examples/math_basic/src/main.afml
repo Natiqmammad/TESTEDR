@@ -1,0 +1,15 @@
+import forge.log as log;
+import forge.math as math;
+
+fun apex() {
+    let root = math.sqrt(9)?;          // result<_, str> with domain checks
+    let sine = math.sin(0.0);          // plain float
+    let cosine = math.cos(0.0);        // plain float
+    let power = math.pow(2.0, 3.0);    // plain float
+    let clamped = math.clamp(15, 0, 10); // ints stay ints
+
+    log.info("root:", root);
+    log.info("sin:", sine, "cos:", cosine);
+    log.info("pow:", power);
+    log.info("clamp:", clamped);
+}

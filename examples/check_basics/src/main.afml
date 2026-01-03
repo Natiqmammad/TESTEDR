@@ -1,0 +1,11 @@
+import forge.log as log;
+
+fun apex() {
+    let value = 15;
+    let label = check value {
+        it < 10 -> "small",
+        it < 20 -> "medium",
+        _ -> "large",
+    };
+    log.info("value:", value, "label:", label);
+}

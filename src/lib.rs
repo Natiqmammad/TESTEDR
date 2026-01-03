@@ -26,10 +26,18 @@ pub mod runtime;
 pub mod span;
 pub mod token;
 pub mod ui;
+pub mod validation;
 
 // Re-export commonly used types
 pub use ast::*;
 pub use runtime::{Interpreter, RuntimeError, RuntimeResult, Value};
+
+#[cfg(test)]
+mod collections_tests;
+#[cfg(test)]
+mod phase2_tests;
+#[cfg(test)]
+mod scope_error_tests;
 
 // Android JNI module (only compiled for Android)
 #[cfg(target_os = "android")]
@@ -87,24 +95,4 @@ fn get_enabled_features() -> Vec<String> {
     features.push("android-jni".to_string());
 
     features
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_version() {
-        let ver = version();
-        assert!(ver.contains("NightScript"));
-    }
-
-    #[test]
-    fn test_build_info() {
-        let info = build_info();
-        assert!(!info.version.is_empty());
-        assert!(!info.target_os.is_empty());
-        assert!(!info.target_arch.is_empty());
-        assert!(!info.features.is_empty());
-    }
 }

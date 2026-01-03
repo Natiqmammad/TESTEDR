@@ -34,6 +34,14 @@ impl<'a> Lexer<'a> {
             };
             let token = if is_ident_start(ch) {
                 self.lex_identifier()?
+            } else if ch.is_alphabetic() && !ch.is_ascii() {
+                let span = Span::new(
+                    self.index,
+                    self.index + ch.len_utf8(),
+                    self.line,
+                    self.column,
+                );
+                return Err(LexError::NonAsciiIdentifierChar { ch, span });
             } else if ch.is_ascii_digit() {
                 self.lex_number()?
             } else {
@@ -144,17 +152,16 @@ impl<'a> Lexer<'a> {
         let mut ident = String::new();
         while let Some(ch) = self.peek_char() {
             if is_ident_char(ch) {
-                if !ch.is_ascii() {
-                    let span = Span::new(
-                        self.index,
-                        self.index + ch.len_utf8(),
-                        self.line,
-                        self.column,
-                    );
-                    return Err(LexError::NonAsciiIdentifierChar { ch, span });
-                }
                 ident.push(ch);
                 self.advance_char();
+            } else if ch.is_alphabetic() && !ch.is_ascii() {
+                let span = Span::new(
+                    self.index,
+                    self.index + ch.len_utf8(),
+                    self.line,
+                    self.column,
+                );
+                return Err(LexError::NonAsciiIdentifierChar { ch, span });
             } else {
                 break;
             }
@@ -170,36 +177,25 @@ impl<'a> Lexer<'a> {
         let start_index = self.index;
         let start_line = self.line;
         let start_col = self.column;
-        let mut literal = String::new();
-        while let Some(ch) = self.peek_char() {
-            if ch.is_ascii_digit() || ch == '_' {
-                literal.push(ch);
-                self.advance_char();
-            } else {
-                break;
-            }
-        }
-        let mut is_float = false;
-        if self.peek_char() == Some('.') {
-            if let Some(next) = self.peek_nth_char(1) {
-                if next.is_ascii_digit() {
-                    is_float = true;
-                    literal.push('.');
-                    self.advance_char(); // consume '.'
-                    while let Some(ch) = self.peek_char() {
-                        if ch.is_ascii_digit() || ch == '_' {
-                            literal.push(ch);
-                            self.advance_char();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        if literal.is_empty() {
+        let int_part = self.take_number_part();
+        if !is_valid_number_part(&int_part) {
             let span = Span::new(start_index, self.index, start_line, start_col);
             return Err(LexError::InvalidNumber { span });
+        }
+        let mut literal = int_part;
+        let mut is_float = false;
+        if self.peek_char() == Some('.') {
+            if matches!(self.peek_nth_char(1), Some(ch) if ch.is_ascii_digit()) {
+                is_float = true;
+                self.advance_char(); // consume '.'
+                let frac_part = self.take_number_part();
+                if !is_valid_number_part(&frac_part) {
+                    let span = Span::new(start_index, self.index, start_line, start_col);
+                    return Err(LexError::InvalidNumber { span });
+                }
+                literal.push('.');
+                literal.push_str(&frac_part);
+            }
         }
         let kind = if is_float {
             TokenKind::FloatLiteral(literal)
@@ -231,6 +227,7 @@ impl<'a> Lexer<'a> {
                             '\\' => '\\',
                             '"' => '"',
                             '\'' => '\'',
+                            '0' => '\0',
                             other => other,
                         };
                         value.push(ch);
@@ -262,6 +259,7 @@ impl<'a> Lexer<'a> {
                     '\\' => '\\',
                     '"' => '"',
                     '\'' => '\'',
+                    '0' => '\0',
                     other => other,
                 },
                 None => {
@@ -308,8 +306,9 @@ impl<'a> Lexer<'a> {
                     }
                     Some('*') => {
                         ate = true;
-                        let start_span =
-                            Span::new(self.index, self.index + 2, self.line, self.column);
+                        let start_index = self.index;
+                        let start_line = self.line;
+                        let start_col = self.column;
                         self.advance_char();
                         self.advance_char();
                         let mut closed = false;
@@ -321,7 +320,8 @@ impl<'a> Lexer<'a> {
                             }
                         }
                         if !closed {
-                            return Err(LexError::UnterminatedBlockComment { span: start_span });
+                            let span = Span::new(start_index, self.index, start_line, start_col);
+                            return Err(LexError::UnterminatedBlockComment { span });
                         }
                     }
                     _ => {}
@@ -393,6 +393,19 @@ impl<'a> Lexer<'a> {
             self.advance_char();
         }
     }
+
+    fn take_number_part(&mut self) -> String {
+        let mut part = String::new();
+        while let Some(ch) = self.peek_char() {
+            if ch.is_ascii_digit() || ch == '_' {
+                part.push(ch);
+                self.advance_char();
+            } else {
+                break;
+            }
+        }
+        part
+    }
 }
 
 fn is_ident_start(ch: char) -> bool {
@@ -401,6 +414,26 @@ fn is_ident_start(ch: char) -> bool {
 
 fn is_ident_char(ch: char) -> bool {
     is_ident_start(ch) || ch.is_ascii_digit()
+}
+
+fn is_valid_number_part(part: &str) -> bool {
+    if part.is_empty() || part.starts_with('_') || part.ends_with('_') {
+        return false;
+    }
+    let mut prev_underscore = false;
+    for ch in part.chars() {
+        if ch == '_' {
+            if prev_underscore {
+                return false;
+            }
+            prev_underscore = true;
+        } else if ch.is_ascii_digit() {
+            prev_underscore = false;
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 fn keyword(ident: &str) -> Option<Keyword> {
@@ -412,6 +445,7 @@ fn keyword(ident: &str) -> Option<Keyword> {
         "async" => Some(Keyword::Async),
         "let" => Some(Keyword::Let),
         "var" => Some(Keyword::Var),
+        "const" => Some(Keyword::Const),
         "struct" => Some(Keyword::Struct),
         "enum" => Some(Keyword::Enum),
         "trait" => Some(Keyword::Trait),
@@ -433,6 +467,13 @@ fn keyword(ident: &str) -> Option<Keyword> {
         "await" => Some(Keyword::Await),
         "true" => Some(Keyword::True),
         "false" => Some(Keyword::False),
+        "break" => Some(Keyword::Break),
+        "continue" => Some(Keyword::Continue),
+        "use" => Some(Keyword::Use),
+        "mod" => Some(Keyword::Mod),
+        "type" => Some(Keyword::Type),
+        "pub" => Some(Keyword::Pub),
+        "check" => Some(Keyword::Check),
         _ => None,
     }
 }

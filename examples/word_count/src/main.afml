@@ -1,0 +1,9 @@
+import forge.log as log;
+
+fun apex() {
+    let counts = map.new();
+    map.put(counts, "hello", 2);
+    map.put(counts, "world", 1);
+    log.info("counts", counts);
+    log.info("has hello", map.contains_key(counts, "hello"));
+}

@@ -1,0 +1,22 @@
+import forge.log as log;
+
+fun apex() {
+    var i = 0;
+    var sum = 0;
+
+    while true {
+        i = i + 1;
+        if i == 2 { continue; }
+        if i > 4 { break; }
+        sum = sum + i;
+    }
+
+    log.info("sum after while:", sum); // 3 + 4 = 7
+
+    var range_sum = 0;
+    for n in 0..3 {
+        range_sum = range_sum + n; // 0 + 1 + 2
+    }
+
+    log.info("range_sum:", range_sum);
+}

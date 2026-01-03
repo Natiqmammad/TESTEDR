@@ -1,0 +1,6 @@
+[package]
+name = "check_guards"
+version = "0.1.0"
+language = "afml"
+
+[dependencies]

@@ -1,0 +1,14 @@
+import forge.log as log;
+
+struct Counter { n:: i32 }
+
+impl Counter {
+    fun value(self:: Counter) -> i32 { return self.n; }
+    fun bump(self_mut:: Counter) -> i32 { return self_mut.n + 1; }
+}
+
+fun apex() {
+    var c = Counter { n: 5 };
+    log.info("val", c.value());
+    log.info("bump", c.bump());
+}

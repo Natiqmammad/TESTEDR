@@ -1,0 +1,13 @@
+import forge.log as log;
+
+fun risky() {
+    forge.error.throw("boom");
+}
+
+fun apex() {
+    try {
+        risky();
+    } catch(e) {
+        log.info("caught", e);
+    }
+}

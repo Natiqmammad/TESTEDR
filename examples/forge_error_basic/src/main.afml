@@ -1,0 +1,13 @@
+import forge.log as log;
+
+fun apex() {
+    let err = forge.error.new("E_CONN", "failed to connect");
+    let wrapped = forge.error.wrap(err, "service");
+    log.info(wrapped);
+    // throwing will stop execution unless caught
+    try {
+        forge.error.throw("fatal");
+    } catch(e) {
+        log.info("handled", e);
+    }
+}

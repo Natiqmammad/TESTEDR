@@ -1,0 +1,19 @@
+import forge.log as log;
+
+fun divide(a:: i32, b:: i32) -> result<i32, str> {
+    if b == 0 { return result.err("div by zero"); }
+    return result.ok(a / b);
+}
+
+fun maybe_user(flag:: bool) -> option<str> {
+    if flag { return option.some("Alice"); }
+    return option.none();
+}
+
+fun apex() {
+    let ok = divide(10, 2);
+    log.info(ok);
+
+    let missing = maybe_user(false);
+    log.info(missing);
+}

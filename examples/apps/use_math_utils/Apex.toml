@@ -1,0 +1,7 @@
+[package]
+name = "use_math_utils"
+version = "0.1.0"
+language = "afml"
+
+[dependencies]
+math_utils = "0.1.0"

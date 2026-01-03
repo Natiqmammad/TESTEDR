@@ -1,0 +1,14 @@
+import forge.log as log;
+
+fun apex() {
+    let a = set.new();
+    let b = set.new();
+    set.insert(a, 1);
+    set.insert(a, 2);
+    set.insert(b, 2);
+    set.insert(b, 3);
+    let u = set.union(a, b);
+    log.info("union", u);
+    let i = set.intersection(a, b);
+    log.info("intersection", i);
+}

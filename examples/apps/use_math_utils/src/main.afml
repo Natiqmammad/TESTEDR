@@ -1,0 +1,10 @@
+import forge.log as log;
+import math_utils as mu;
+import math_utils.extra as ex;
+
+fun apex() {
+    let sum = mu.add(2, 3);
+    let prod = mu.mul(3, 4);
+    let doubled = ex.double(10);
+    log.info("sum:", sum, "prod:", prod, "double:", doubled);
+}

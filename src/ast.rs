@@ -12,6 +12,7 @@ pub struct File {
 #[derive(Debug, Clone)]
 pub struct Import {
     pub path: Vec<String>,
+    pub member: Option<String>,
     pub alias: Option<String>,
     pub span: Span,
 }
@@ -156,6 +157,8 @@ pub enum Stmt {
         span: Span,
     },
     Assembly(AssemblyBlock),
+    Break(Span),
+    Continue(Span),
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +174,7 @@ pub struct VarDecl {
 pub enum VarKind {
     Let,
     Var,
+    Const,
 }
 
 #[derive(Debug, Clone)]
@@ -296,6 +300,15 @@ pub enum Expr {
         elements: Vec<Expr>,
         span: Span,
     },
+    TupleLiteral {
+        elements: Vec<Expr>,
+        span: Span,
+    },
+    Cast {
+        expr: Box<Expr>,
+        ty: TypeExpr,
+        span: Span,
+    },
     Block(Block),
     If(Box<IfStmt>),
     Try {
@@ -314,6 +327,7 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
+    Check(CheckExpr),
 }
 
 impl Expr {
@@ -329,11 +343,14 @@ impl Expr {
             | Expr::Assignment { span, .. }
             | Expr::StructLiteral { span, .. }
             | Expr::ArrayLiteral { span, .. }
+            | Expr::TupleLiteral { span, .. }
+            | Expr::Cast { span, .. }
             | Expr::Try { span, .. }
             | Expr::Lambda(LambdaExpr { span, .. })
             | Expr::Block(Block { span, .. })
             | Expr::Index { span, .. }
-            | Expr::MethodCall { span, .. } => *span,
+            | Expr::MethodCall { span, .. }
+            | Expr::Check(CheckExpr { span, .. }) => *span,
             Expr::If(if_stmt) => if_stmt.span,
         }
     }
@@ -392,6 +409,37 @@ pub struct LambdaParam {
     pub name: String,
     pub ty: Option<TypeExpr>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckExpr {
+    pub target: Option<Box<Expr>>,
+    pub arms: Vec<CheckArm>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckArm {
+    pub pattern: CheckPattern,
+    pub expr: Box<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum CheckPattern {
+    Wildcard { span: Span },
+    Literal(Literal),
+    Guard(Expr),
+}
+
+impl CheckPattern {
+    pub fn span(&self) -> Span {
+        match self {
+            CheckPattern::Wildcard { span } => *span,
+            CheckPattern::Literal(lit) => lit.span(),
+            CheckPattern::Guard(expr) => expr.span(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

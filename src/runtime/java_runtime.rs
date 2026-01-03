@@ -174,8 +174,16 @@ fn java_value_from<'env>(
             let jstr = env.new_string(s).map_err(map_jni_error)?;
             Ok(JValueOwned::Object(jstr.into()))
         }
-        (NativeType::I32, Value::Int(i)) => Ok(JValueOwned::Int(*i as i32)),
-        (NativeType::I64, Value::Int(i)) => Ok(JValueOwned::Long(*i)),
+        (NativeType::I32, Value::Int(i)) => {
+            let raw = i32::try_from(*i)
+                .map_err(|_| RuntimeError::new("java int32 argument out of range"))?;
+            Ok(JValueOwned::Int(raw))
+        }
+        (NativeType::I64, Value::Int(i)) => {
+            let raw = i64::try_from(*i)
+                .map_err(|_| RuntimeError::new("java int64 argument out of range"))?;
+            Ok(JValueOwned::Long(raw))
+        }
         (NativeType::Bool, Value::Bool(b)) => Ok(JValueOwned::Bool(if *b { 1 } else { 0 })),
         (NativeType::Bytes, Value::Vec(vec)) => {
             let mut bytes = Vec::new();
@@ -233,7 +241,7 @@ fn convert_java_return(
                     .map_err(map_jni_error)?;
                 let vec_values = buffer
                     .into_iter()
-                    .map(|b| Value::Int(b as i64))
+                    .map(|b| Value::Int(i128::from(b)))
                     .collect::<Vec<_>>();
                 Ok(make_vec(vec_values))
             } else {
@@ -244,14 +252,14 @@ fn convert_java_return(
         }
         Some(NativeType::I32) => {
             if let JValueOwned::Int(i) = result {
-                Ok(Value::Int(i as i64))
+                Ok(Value::Int(i128::from(i)))
             } else {
                 Err(RuntimeError::new("java method returned wrong int32 type"))
             }
         }
         Some(NativeType::I64) => {
             if let JValueOwned::Long(i) = result {
-                Ok(Value::Int(i))
+                Ok(Value::Int(i.into()))
             } else {
                 Err(RuntimeError::new("java method returned wrong int64 type"))
             }

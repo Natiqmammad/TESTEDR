@@ -1,0 +1,16 @@
+import forge.log as log;
+
+trait Display { fun to_string(self:: Point) -> str; }
+
+struct Point { x:: i32, y:: i32 }
+
+impl Display for Point {
+    fun to_string(self:: Point) -> str {
+        return "(point)";
+    }
+}
+
+fun apex() {
+    let p = Point { x: 1, y: 2 };
+    log.info("display", Display::to_string(p));
+}

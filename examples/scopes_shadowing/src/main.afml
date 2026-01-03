@@ -1,0 +1,10 @@
+import forge.log as log;
+
+fun apex() {
+    let x = 1;
+    {
+        let x = 2; // shadow outer
+        log.info("inner x", x);
+    }
+    log.info("outer x", x);
+}

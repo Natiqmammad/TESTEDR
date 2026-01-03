@@ -1,0 +1,4 @@
+package = "nested_vec"
+version = "0.1.0"
+
+[dependencies]

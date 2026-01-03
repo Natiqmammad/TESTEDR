@@ -1,0 +1,10 @@
+import forge.log as log;
+
+fun apex() {
+    let m = map.new();
+    map.put(m, "alpha", 1);
+    map.put(m, "beta", 2);
+    log.info("len", map.len(m));
+    log.info("alpha?", map.contains_key(m, "alpha"));
+    log.info("keys", map.keys(m));
+}

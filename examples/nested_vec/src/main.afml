@@ -1,0 +1,17 @@
+import forge.log as log;
+
+fun apex() {
+    let rows:: vec<vec<i32>> = vec.new();
+    let r1 = vec.new();
+    vec.push(r1, 1);
+    vec.push(r1, 2);
+    vec.push(rows, r1);
+
+    let r2 = vec.new();
+    vec.push(r2, 3);
+    vec.push(r2, 4);
+    vec.push(rows, r2);
+
+    log.info("rows len", vec.len(rows));
+    log.info("first row", vec.get(rows, 0));
+}

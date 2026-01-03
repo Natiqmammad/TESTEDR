@@ -1,0 +1,3 @@
+[package]
+name = "scopes_shadowing"
+version = "0.1.0"

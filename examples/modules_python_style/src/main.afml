@@ -1,0 +1,7 @@
+import forge.log as log;
+import math as m;
+
+fun apex() {
+    let sum = m.add(2, 3);
+    log.info("sum:", sum);
+}

@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::io::{Read, Write};
@@ -15,10 +15,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::ast::{
-    Block, Expr, File, IfStmt, Import, Item, Literal, NamedType, Param, Pattern, Stmt, SwitchStmt,
-    TryCatch, TypeExpr,
+    Block, CheckPattern, Expr, File, FunctionSignature, IfStmt, Import, Item, Literal, NamedType,
+    Param, Pattern, Stmt, SwitchStmt, TraitDef, TryCatch, TypeExpr, VarKind,
 };
 use crate::module_loader::{ExportMeta, ExportSchema, ModuleLoader};
+use crate::span::Span;
 use java_runtime::JavaRuntime;
 use libloading::Library;
 
@@ -36,30 +37,83 @@ mod forge;
 mod java_runtime;
 pub mod web;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RuntimeError {
-    Message(String),
-    Propagate(Value),
+    Message {
+        message: String,
+        span: Option<Span>,
+        context: Option<String>,
+    },
+    Propagate {
+        value: Value,
+        span: Option<Span>,
+    },
 }
 
 impl RuntimeError {
     fn new<S: Into<String>>(msg: S) -> Self {
-        RuntimeError::Message(msg.into())
+        RuntimeError::Message {
+            message: msg.into(),
+            span: None,
+            context: None,
+        }
     }
 
     fn propagate(value: Value) -> Self {
-        RuntimeError::Propagate(value)
+        RuntimeError::Propagate { value, span: None }
+    }
+
+    fn with_span(mut self, span: Span) -> Self {
+        match &mut self {
+            RuntimeError::Message { span: s, .. } | RuntimeError::Propagate { span: s, .. } => {
+                if s.is_none() {
+                    *s = Some(span);
+                }
+            }
+        }
+        self
+    }
+
+    fn with_context(mut self, context: &'static str) -> Self {
+        if let RuntimeError::Message { context: c, .. } = &mut self {
+            if c.is_none() {
+                *c = Some(context.to_string());
+            }
+        }
+        self
+    }
+
+    pub fn span(&self) -> Option<Span> {
+        match self {
+            RuntimeError::Message { span, .. } | RuntimeError::Propagate { span, .. } => *span,
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            RuntimeError::Message {
+                message, context, ..
+            } => match context {
+                Some(ctx) => format!("{message} ({ctx})"),
+                None => message.clone(),
+            },
+            RuntimeError::Propagate { value, .. } => {
+                format!("propagated error: {}", value.to_string_value())
+            }
+        }
+    }
+
+    fn propagated_value(&self) -> Option<Value> {
+        match self {
+            RuntimeError::Propagate { value, .. } => Some(value.clone()),
+            _ => None,
+        }
     }
 }
 
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RuntimeError::Message(msg) => write!(f, "{msg}"),
-            RuntimeError::Propagate(value) => {
-                write!(f, "propagated error: {}", value.to_string_value())
-            }
-        }
+        write!(f, "{}", self.message())
     }
 }
 
@@ -106,11 +160,11 @@ impl NativeBinding {
             }
             ([], Some(NativeType::I32)) => {
                 let func: unsafe extern "C" fn() -> i32 = unsafe { mem::transmute(self.symbol) };
-                Ok(Value::Int(unsafe { func() } as i64))
+                Ok(Value::Int(unsafe { func() } as i128))
             }
             ([], Some(NativeType::I64)) => {
                 let func: unsafe extern "C" fn() -> i64 = unsafe { mem::transmute(self.symbol) };
-                Ok(Value::Int(unsafe { func() }))
+                Ok(Value::Int(unsafe { func() } as i128))
             }
             ([], Some(NativeType::Bool)) => {
                 let func: unsafe extern "C" fn() -> i32 = unsafe { mem::transmute(self.symbol) };
@@ -130,7 +184,7 @@ impl NativeBinding {
             ([NativeType::Str], Some(NativeType::I32)) => {
                 let func: unsafe extern "C" fn(*const c_char) -> i32 =
                     unsafe { mem::transmute(self.symbol) };
-                Ok(Value::Int(unsafe { func(prepared[0].as_ptr()) } as i64))
+                Ok(Value::Int(unsafe { func(prepared[0].as_ptr()) } as i128))
             }
             ([NativeType::Str, NativeType::Str], Some(NativeType::Str)) => {
                 let func: unsafe extern "C" fn(*const c_char, *const c_char) -> *const c_char =
@@ -148,13 +202,13 @@ impl NativeBinding {
             ([NativeType::I32], Some(NativeType::I32)) => {
                 let func: unsafe extern "C" fn(i32) -> i32 = unsafe { mem::transmute(self.symbol) };
                 let res = unsafe { func(prepared[0].as_i32()) };
-                Ok(Value::Int(res as i64))
+                Ok(Value::Int(res as i128))
             }
             ([NativeType::I32, NativeType::I32], Some(NativeType::I32)) => {
                 let func: unsafe extern "C" fn(i32, i32) -> i32 =
                     unsafe { mem::transmute(self.symbol) };
                 let res = unsafe { func(prepared[0].as_i32(), prepared[1].as_i32()) };
-                Ok(Value::Int(res as i64))
+                Ok(Value::Int(res as i128))
             }
             _ => Err(RuntimeError::new(format!(
                 "unsupported native signature: {:?}",
@@ -298,7 +352,12 @@ impl PreparedArg {
                 })?;
                 NativeArgValue::I32(raw)
             }
-            (NativeType::I64, Value::Int(i)) => NativeArgValue::I64(*i),
+            (NativeType::I64, Value::Int(i)) => {
+                let raw = i64::try_from(*i).map_err(|_| {
+                    RuntimeError::new("native i64 parameter overflows 64-bit range")
+                })?;
+                NativeArgValue::I64(raw)
+            }
             (NativeType::Bool, Value::Bool(b)) => NativeArgValue::Bool(if *b { 1 } else { 0 }),
             (NativeType::Bytes, _) => {
                 return Err(RuntimeError::new(
@@ -356,8 +415,15 @@ static NET_UDP: OnceLock<Mutex<HashMap<i64, UdpSocket>>> = OnceLock::new();
 static NEXT_NET_ID: AtomicI64 = AtomicI64::new(1);
 
 #[derive(Clone, Debug)]
+struct Binding {
+    value: Value,
+    kind: VarKind,
+    type_tag: Option<TypeTag>,
+}
+
+#[derive(Clone, Debug)]
 struct EnvData {
-    values: HashMap<String, Value>,
+    values: HashMap<String, Binding>,
     parent: Option<Env>,
 }
 
@@ -377,50 +443,202 @@ impl Env {
     }
 
     fn define(&self, name: impl Into<String>, value: Value) {
-        self.0.borrow_mut().values.insert(name.into(), value);
+        self.define_binding_internal(name, value, VarKind::Let, None);
+    }
+
+    fn define_mutable(&self, name: impl Into<String>, value: Value) {
+        self.define_binding_internal(name, value, VarKind::Var, None);
+    }
+
+    fn define_binding_internal(
+        &self,
+        name: impl Into<String>,
+        value: Value,
+        kind: VarKind,
+        type_tag: Option<TypeTag>,
+    ) {
+        self.0.borrow_mut().values.insert(
+            name.into(),
+            Binding {
+                value,
+                kind,
+                type_tag,
+            },
+        );
+    }
+
+    fn define_var(
+        &self,
+        name: String,
+        kind: VarKind,
+        value: Value,
+        type_tag: Option<TypeTag>,
+    ) -> RuntimeResult<()> {
+        if !name.is_ascii() {
+            return Err(RuntimeError::new(
+                "Non-ASCII identifier characters are not allowed",
+            ));
+        }
+        if self.0.borrow().values.contains_key(&name) {
+            return Err(RuntimeError::new(format!(
+                "Variable `{name}` is already declared in this scope"
+            )));
+        }
+        self.define_binding_internal(name, value, kind, type_tag);
+        Ok(())
+    }
+
+    fn assign_typed(&self, name: &str, value: TypedValue) -> RuntimeResult<TypedValue> {
+        if let Some(binding) = self.0.borrow_mut().values.get_mut(name) {
+            if !matches!(binding.kind, VarKind::Var) {
+                let label = match binding.kind {
+                    VarKind::Let => "immutable let",
+                    VarKind::Const => "const",
+                    VarKind::Var => "mutable var",
+                };
+                return Err(RuntimeError::new(format!(
+                    "Cannot assign to {label} variable `{name}`"
+                )));
+            }
+            let target_tag = binding
+                .type_tag
+                .clone()
+                .unwrap_or_else(|| value_type_tag(&binding.value));
+            let coerced = coerce_typed_to_tag(value, &target_tag)?;
+            binding.value = coerced.value.clone();
+            binding.type_tag = Some(target_tag.clone());
+            return Ok(TypedValue {
+                value: binding.value.clone(),
+                tag: Some(target_tag),
+                is_literal: false,
+            });
+        }
+        if let Some(parent) = &self.0.borrow().parent {
+            return parent.assign_typed(name, value);
+        }
+        Err(RuntimeError::new(format!("Undefined variable `{name}`")))
     }
 
     fn assign(&self, name: &str, value: Value) -> RuntimeResult<()> {
-        if self.0.borrow_mut().values.contains_key(name) {
-            self.0.borrow_mut().values.insert(name.to_string(), value);
-            return Ok(());
+        self.assign_typed(
+            name,
+            TypedValue {
+                tag: Some(value_type_tag(&value)),
+                value,
+                is_literal: false,
+            },
+        )
+        .map(|_| ())
+    }
+
+    fn get_typed(&self, name: &str) -> RuntimeResult<TypedValue> {
+        if let Some(binding) = self.0.borrow().values.get(name) {
+            let tag = binding
+                .type_tag
+                .clone()
+                .or_else(|| Some(value_type_tag(&binding.value)));
+            return Ok(TypedValue {
+                value: binding.value.clone(),
+                tag,
+                is_literal: false,
+            });
         }
         if let Some(parent) = &self.0.borrow().parent {
-            return parent.assign(name, value);
+            return parent.get_typed(name);
         }
         Err(RuntimeError::new(format!("Undefined variable `{name}`")))
     }
 
     fn get(&self, name: &str) -> RuntimeResult<Value> {
-        if let Some(val) = self.0.borrow().values.get(name) {
-            return Ok(val.clone());
+        if let Some(binding) = self.0.borrow().values.get(name) {
+            return Ok(binding.value.clone());
         }
         if let Some(parent) = &self.0.borrow().parent {
             return parent.get(name);
         }
         Err(RuntimeError::new(format!("Undefined variable `{name}`")))
     }
+
+    fn binding_kind(&self, name: &str) -> Option<VarKind> {
+        if let Some(binding) = self.0.borrow().values.get(name) {
+            return Some(binding.kind);
+        }
+        self.0.borrow().parent.as_ref()?.binding_kind(name)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IntType {
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+}
+
+impl IntType {
+    fn is_signed(&self) -> bool {
+        matches!(
+            self,
+            IntType::I8 | IntType::I16 | IntType::I32 | IntType::I64 | IntType::I128
+        )
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            IntType::I8 => "i8",
+            IntType::I16 => "i16",
+            IntType::I32 => "i32",
+            IntType::I64 => "i64",
+            IntType::I128 => "i128",
+            IntType::U8 => "u8",
+            IntType::U16 => "u16",
+            IntType::U32 => "u32",
+            IntType::U64 => "u64",
+            IntType::U128 => "u128",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FloatType {
+    F32,
+    F64,
+}
+
+impl FloatType {
+    fn name(&self) -> &'static str {
+        match self {
+            FloatType::F32 => "f32",
+            FloatType::F64 => "f64",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrimitiveType {
     Bool,
-    Int,
-    UInt,
-    Float,
+    Int(IntType),
+    Float(FloatType),
     String,
     Char,
+    Unit,
 }
 
 impl fmt::Display for PrimitiveType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PrimitiveType::Bool => write!(f, "bool"),
-            PrimitiveType::Int => write!(f, "int"),
-            PrimitiveType::UInt => write!(f, "uint"),
-            PrimitiveType::Float => write!(f, "float"),
+            PrimitiveType::Int(kind) => write!(f, "{}", kind.name()),
+            PrimitiveType::Float(kind) => write!(f, "{}", kind.name()),
             PrimitiveType::String => write!(f, "str"),
             PrimitiveType::Char => write!(f, "char"),
+            PrimitiveType::Unit => write!(f, "()"),
         }
     }
 }
@@ -429,6 +647,8 @@ impl fmt::Display for PrimitiveType {
 pub enum TypeTag {
     Primitive(PrimitiveType),
     Vec(Box<TypeTag>),
+    Array(Box<TypeTag>, usize),
+    Slice(Box<TypeTag>),
     Set(Box<TypeTag>),
     Map(Box<TypeTag>, Box<TypeTag>),
     Option(Box<TypeTag>),
@@ -444,6 +664,8 @@ impl TypeTag {
         match self {
             TypeTag::Primitive(p) => p.to_string(),
             TypeTag::Vec(inner) => format!("vec<{}>", inner.describe()),
+            TypeTag::Array(inner, size) => format!("[{}; {}]", inner.describe(), size),
+            TypeTag::Slice(inner) => format!("slice<{}>", inner.describe()),
             TypeTag::Set(inner) => format!("set<{}>", inner.describe()),
             TypeTag::Map(key, value) => format!("map<{}, {}>", key.describe(), value.describe()),
             TypeTag::Option(inner) => format!("option<{}>", inner.describe()),
@@ -476,14 +698,36 @@ fn format_named_with_generics(name: &str, params: &[TypeTag]) -> String {
     }
 }
 
+#[derive(Clone, Debug)]
+struct StructSchema {
+    name: String,
+    fields: HashMap<String, TypeTag>,
+}
+
+#[derive(Clone, Debug)]
+struct EnumSchema {
+    name: String,
+    variants: HashMap<String, Vec<TypeTag>>,
+}
+
 fn primitive_from_name(name: &str) -> Option<PrimitiveType> {
     match name {
         "bool" => Some(PrimitiveType::Bool),
         "str" | "string" => Some(PrimitiveType::String),
         "char" => Some(PrimitiveType::Char),
-        "f32" | "f64" => Some(PrimitiveType::Float),
-        "i8" | "i16" | "i32" | "i64" | "i128" => Some(PrimitiveType::Int),
-        "u8" | "u16" | "u32" | "u64" | "u128" => Some(PrimitiveType::UInt),
+        "f32" => Some(PrimitiveType::Float(FloatType::F32)),
+        "f64" => Some(PrimitiveType::Float(FloatType::F64)),
+        "i8" => Some(PrimitiveType::Int(IntType::I8)),
+        "i16" => Some(PrimitiveType::Int(IntType::I16)),
+        "i32" => Some(PrimitiveType::Int(IntType::I32)),
+        "i64" => Some(PrimitiveType::Int(IntType::I64)),
+        "i128" => Some(PrimitiveType::Int(IntType::I128)),
+        "u8" => Some(PrimitiveType::Int(IntType::U8)),
+        "u16" => Some(PrimitiveType::Int(IntType::U16)),
+        "u32" => Some(PrimitiveType::Int(IntType::U32)),
+        "u64" => Some(PrimitiveType::Int(IntType::U64)),
+        "u128" => Some(PrimitiveType::Int(IntType::U128)),
+        "unit" => Some(PrimitiveType::Unit),
         _ => None,
     }
 }
@@ -499,14 +743,16 @@ fn type_tag_from_type_expr_with_bindings(
 ) -> TypeTag {
     match expr {
         TypeExpr::Named(named) => type_tag_from_named(named, bindings),
-        TypeExpr::Slice { element, .. } | TypeExpr::Reference { inner: element, .. } => {
-            TypeTag::Vec(Box::new(type_tag_from_type_expr_with_bindings(
-                element, bindings,
-            )))
-        }
-        TypeExpr::Array { element, .. } => TypeTag::Vec(Box::new(
+        TypeExpr::Slice { element, .. } => TypeTag::Slice(Box::new(
             type_tag_from_type_expr_with_bindings(element, bindings),
         )),
+        TypeExpr::Reference { inner: element, .. } => TypeTag::Slice(Box::new(
+            type_tag_from_type_expr_with_bindings(element, bindings),
+        )),
+        TypeExpr::Array { element, size, .. } => TypeTag::Array(
+            Box::new(type_tag_from_type_expr_with_bindings(element, bindings)),
+            *size,
+        ),
         TypeExpr::Tuple { elements, .. } => TypeTag::Tuple(
             elements
                 .iter()
@@ -602,13 +848,24 @@ fn type_tag_from_named(named: &NamedType, bindings: &HashMap<String, TypeTag>) -
 fn type_tag_matches_value(tag: &TypeTag, value: &Value) -> bool {
     match tag {
         TypeTag::Primitive(PrimitiveType::Bool) => matches!(value, Value::Bool(_)),
-        TypeTag::Primitive(PrimitiveType::Int) | TypeTag::Primitive(PrimitiveType::UInt) => {
-            matches!(value, Value::Int(_))
-        }
-        TypeTag::Primitive(PrimitiveType::Float) => matches!(value, Value::Float(_)),
+        TypeTag::Primitive(PrimitiveType::Int(_)) => matches!(value, Value::Int(_)),
+        TypeTag::Primitive(PrimitiveType::Float(_)) => matches!(value, Value::Float(_)),
         TypeTag::Primitive(PrimitiveType::String) => matches!(value, Value::String(_)),
-        TypeTag::Primitive(PrimitiveType::Char) => matches!(value, Value::String(_)),
+        TypeTag::Primitive(PrimitiveType::Char) => matches!(value, Value::Char(_)),
+        TypeTag::Primitive(PrimitiveType::Unit) => matches!(value, Value::Null),
         TypeTag::Vec(_) => matches!(value, Value::Vec(_)),
+        TypeTag::Array(inner, expected_len) => {
+            if let Value::Array(arr_rc) = value {
+                let arr_ref = arr_rc.borrow();
+                arr_ref.len() == *expected_len
+                    && arr_ref.iter().all(|v| {
+                        type_tag_matches_value(inner, v) || matches!(**inner, TypeTag::Unknown)
+                    })
+            } else {
+                false
+            }
+        }
+        TypeTag::Slice(_) => matches!(value, Value::Vec(_) | Value::Array(_)),
         TypeTag::Set(_) => matches!(value, Value::Set(_)),
         TypeTag::Map(_, _) => matches!(value, Value::Map(_)),
         TypeTag::Option(_) => matches!(value, Value::Option(_)),
@@ -650,12 +907,56 @@ fn type_tag_matches_value(tag: &TypeTag, value: &Value) -> bool {
 
 fn ensure_tag_match(tag: &Option<TypeTag>, value: &Value, context: &str) -> RuntimeResult<()> {
     if let Some(expected) = tag {
-        if !type_tag_matches_value(expected, value) {
-            return Err(RuntimeError::new(format!(
-                "{context}: expected value of type {}, got {}",
-                expected.describe(),
-                value.type_name()
-            )));
+        match expected {
+            TypeTag::Array(inner, size) => {
+                if let Value::Array(arr_rc) = value {
+                    let arr_ref = arr_rc.borrow();
+                    if arr_ref.len() != *size {
+                        return Err(RuntimeError::new(format!(
+                            "{context}: array length mismatch: expected {}, found {}",
+                            size,
+                            arr_ref.len()
+                        )));
+                    }
+                    for elem in arr_ref.iter() {
+                        ensure_tag_match(&Some((**inner).clone()), elem, context)?;
+                    }
+                } else {
+                    return Err(RuntimeError::new(format!(
+                        "{context}: expected value of type {}, got {}",
+                        expected.describe(),
+                        value.type_name()
+                    )));
+                }
+            }
+            TypeTag::Slice(inner) => match value {
+                Value::Vec(vec_rc) => {
+                    for elem in vec_rc.borrow().iter() {
+                        ensure_tag_match(&Some((**inner).clone()), elem, context)?;
+                    }
+                }
+                Value::Array(arr_rc) => {
+                    for elem in arr_rc.borrow().iter() {
+                        ensure_tag_match(&Some((**inner).clone()), elem, context)?;
+                    }
+                }
+                _ => {
+                    return Err(RuntimeError::new(format!(
+                        "{context}: expected value of type {}, got {}",
+                        expected.describe(),
+                        value.type_name()
+                    )))
+                }
+            },
+            _ => {
+                if !type_tag_matches_value(expected, value) {
+                    return Err(RuntimeError::new(format!(
+                        "{context}: expected value of type {}, got {}",
+                        expected.describe(),
+                        value.type_name()
+                    )));
+                }
+            }
         }
     }
     Ok(())
@@ -765,19 +1066,26 @@ fn bind_type_params_from_type_expr(
                 }
             }
         }
-        TypeExpr::Array { element, .. }
-        | TypeExpr::Slice { element, .. }
-        | TypeExpr::Reference { inner: element, .. } => {
-            bind_type_params_from_type_expr(element, actual, type_params, bindings);
+        TypeExpr::Array { element, .. } => {
+            if let TypeTag::Array(tag, _) = actual {
+                bind_type_params_from_type_expr(element, tag, type_params, bindings);
+            }
+        }
+        TypeExpr::Slice { element, .. } | TypeExpr::Reference { inner: element, .. } => {
+            if let TypeTag::Slice(tag) = actual {
+                bind_type_params_from_type_expr(element, tag, type_params, bindings);
+            }
         }
     }
 }
 
 fn value_type_tag(value: &Value) -> TypeTag {
     match value {
+        Value::Null => TypeTag::Primitive(PrimitiveType::Unit),
         Value::Bool(_) => TypeTag::Primitive(PrimitiveType::Bool),
-        Value::Int(_) => TypeTag::Primitive(PrimitiveType::Int),
-        Value::Float(_) => TypeTag::Primitive(PrimitiveType::Float),
+        Value::Int(_) => TypeTag::Primitive(PrimitiveType::Int(IntType::I64)),
+        Value::Float(_) => TypeTag::Primitive(PrimitiveType::Float(FloatType::F64)),
+        Value::Char(_) => TypeTag::Primitive(PrimitiveType::Char),
         Value::String(_) => TypeTag::Primitive(PrimitiveType::String),
         Value::Vec(vec_rc) => {
             let elem = vec_rc
@@ -786,6 +1094,11 @@ fn value_type_tag(value: &Value) -> TypeTag {
                 .clone()
                 .unwrap_or(TypeTag::Unknown);
             TypeTag::Vec(Box::new(elem))
+        }
+        Value::Array(array_rc) => {
+            let array_ref = array_rc.borrow();
+            let elem = array_ref.elem_type.clone().unwrap_or(TypeTag::Unknown);
+            TypeTag::Array(Box::new(elem), array_ref.len())
         }
         Value::Map(map_rc) => {
             let map_ref = map_rc.borrow();
@@ -846,6 +1159,250 @@ fn value_type_tag(value: &Value) -> TypeTag {
     }
 }
 
+fn resolved_tag(value: &TypedValue) -> TypeTag {
+    value
+        .tag
+        .clone()
+        .unwrap_or_else(|| value_type_tag(&value.value))
+}
+
+fn int_fits_type(value: i128, kind: &IntType) -> bool {
+    match kind {
+        IntType::I8 => (-128..=127).contains(&value),
+        IntType::I16 => (i16::MIN as i128..=i16::MAX as i128).contains(&value),
+        IntType::I32 => (i32::MIN as i128..=i32::MAX as i128).contains(&value),
+        IntType::I64 => (i64::MIN as i128..=i64::MAX as i128).contains(&value),
+        IntType::I128 => true,
+        IntType::U8 => (0..=u8::MAX as i128).contains(&value),
+        IntType::U16 => (0..=u16::MAX as i128).contains(&value),
+        IntType::U32 => (0..=u32::MAX as i128).contains(&value),
+        IntType::U64 => (0..=u64::MAX as i128).contains(&value),
+        IntType::U128 => value >= 0,
+    }
+}
+
+fn cast_typed_to_tag(value: TypedValue, target: &TypeTag) -> RuntimeResult<TypedValue> {
+    match target {
+        TypeTag::Primitive(PrimitiveType::Int(kind)) => match value.value {
+            Value::Int(i) => {
+                if int_fits_type(i, kind) {
+                    Ok(TypedValue {
+                        value: Value::Int(i),
+                        tag: Some(target.clone()),
+                        is_literal: false,
+                    })
+                } else {
+                    Err(RuntimeError::new(format!(
+                        "cast out of range: cannot fit {} into {}",
+                        i,
+                        target.describe()
+                    )))
+                }
+            }
+            Value::Float(f) => {
+                if !f.is_finite() {
+                    return Err(RuntimeError::new(
+                        "cannot cast NaN or infinite float to int",
+                    ));
+                }
+                if f.fract() != 0.0 {
+                    return Err(RuntimeError::new(
+                        "cannot cast float with fractional part to int",
+                    ));
+                }
+                let val = f as i128;
+                if int_fits_type(val, kind) {
+                    Ok(TypedValue {
+                        value: Value::Int(val),
+                        tag: Some(target.clone()),
+                        is_literal: false,
+                    })
+                } else {
+                    Err(RuntimeError::new(format!(
+                        "cast out of range: cannot fit {} into {}",
+                        f,
+                        target.describe()
+                    )))
+                }
+            }
+            other => Err(RuntimeError::new(format!(
+                "cannot cast {} to {}",
+                value_type_tag(&other).describe(),
+                target.describe()
+            ))),
+        },
+        TypeTag::Primitive(PrimitiveType::Float(kind)) => match value.value {
+            Value::Int(i) => {
+                let f = i as f64;
+                if matches!(kind, FloatType::F32) && (f > f32::MAX as f64 || f < f32::MIN as f64) {
+                    return Err(RuntimeError::new(format!(
+                        "cast out of range: cannot fit {} into {}",
+                        i,
+                        target.describe()
+                    )));
+                }
+                let value = if matches!(kind, FloatType::F32) {
+                    Value::Float(f as f32 as f64)
+                } else {
+                    Value::Float(f)
+                };
+                Ok(TypedValue {
+                    tag: Some(target.clone()),
+                    value,
+                    is_literal: false,
+                })
+            }
+            Value::Float(f) => {
+                if !f.is_finite() {
+                    return Err(RuntimeError::new("cannot cast NaN or infinite float"));
+                }
+                if matches!(kind, FloatType::F32) && (f > f32::MAX as f64 || f < f32::MIN as f64) {
+                    return Err(RuntimeError::new(format!(
+                        "cast out of range: cannot fit {} into {}",
+                        f,
+                        target.describe()
+                    )));
+                }
+                let value = if matches!(kind, FloatType::F32) {
+                    Value::Float(f as f32 as f64)
+                } else {
+                    Value::Float(f)
+                };
+                Ok(TypedValue {
+                    tag: Some(target.clone()),
+                    value,
+                    is_literal: false,
+                })
+            }
+            other => Err(RuntimeError::new(format!(
+                "cannot cast {} to {}",
+                value_type_tag(&other).describe(),
+                target.describe()
+            ))),
+        },
+        _ => Err(RuntimeError::new(format!(
+            "casting to {} is not supported yet",
+            target.describe()
+        ))),
+    }
+}
+
+fn float_fits_type(value: f64, kind: &FloatType) -> bool {
+    match kind {
+        FloatType::F32 => value.is_finite() && value >= f32::MIN as f64 && value <= f32::MAX as f64,
+        FloatType::F64 => true,
+    }
+}
+
+fn coerce_typed_to_tag(mut value: TypedValue, tag: &TypeTag) -> RuntimeResult<TypedValue> {
+    let actual = resolved_tag(&value);
+    if &actual == tag {
+        value.tag = Some(tag.clone());
+        value.is_literal = false;
+        return Ok(value);
+    }
+    match tag {
+        TypeTag::Primitive(PrimitiveType::Int(kind)) => {
+            if let Value::Int(i) = value.value {
+                if value.is_literal && int_fits_type(i, kind) {
+                    return Ok(TypedValue {
+                        value: Value::Int(i),
+                        tag: Some(TypeTag::Primitive(PrimitiveType::Int(kind.clone()))),
+                        is_literal: false,
+                    });
+                }
+            }
+        }
+        TypeTag::Array(inner, size) => {
+            if let Value::Array(arr_rc) = &value.value {
+                {
+                    let arr_ref = arr_rc.borrow();
+                    if arr_ref.len() != *size {
+                        return Err(RuntimeError::new(format!(
+                            "array length mismatch: expected {}, found {}",
+                            size,
+                            arr_ref.len()
+                        )));
+                    }
+                    for elem in arr_ref.iter() {
+                        ensure_tag_match(&Some((**inner).clone()), elem, "array element")?;
+                    }
+                }
+                let mut out = value.value.clone();
+                apply_type_tag_to_value(&mut out, tag);
+                return Ok(TypedValue {
+                    value: out,
+                    tag: Some(tag.clone()),
+                    is_literal: false,
+                });
+            }
+        }
+        TypeTag::Slice(inner) => {
+            match &value.value {
+                Value::Vec(vec_rc) => {
+                    let vec_ref = vec_rc.borrow();
+                    for elem in vec_ref.iter() {
+                        ensure_tag_match(&Some((**inner).clone()), elem, "slice element")?;
+                    }
+                }
+                Value::Array(arr_rc) => {
+                    let arr_ref = arr_rc.borrow();
+                    for elem in arr_ref.iter() {
+                        ensure_tag_match(&Some((**inner).clone()), elem, "slice element")?;
+                    }
+                }
+                _ => {
+                    return Err(RuntimeError::new(format!(
+                        "Expected value of type {}, got {}",
+                        tag.describe(),
+                        actual.describe()
+                    )))
+                }
+            }
+            let mut out = value.value.clone();
+            apply_type_tag_to_value(&mut out, tag);
+            return Ok(TypedValue {
+                value: out,
+                tag: Some(tag.clone()),
+                is_literal: false,
+            });
+        }
+        TypeTag::Primitive(PrimitiveType::Float(kind)) => {
+            if let Value::Float(f) = value.value {
+                if value.is_literal && float_fits_type(f, kind) {
+                    return Ok(TypedValue {
+                        value: Value::Float(f),
+                        tag: Some(TypeTag::Primitive(PrimitiveType::Float(kind.clone()))),
+                        is_literal: false,
+                    });
+                }
+            }
+        }
+        TypeTag::Unknown => {
+            value.tag = Some(TypeTag::Unknown);
+            value.is_literal = false;
+            return Ok(value);
+        }
+        _ => {}
+    }
+
+    if type_tag_matches_value(tag, &value.value) {
+        let mut coerced = value.value;
+        apply_type_tag_to_value(&mut coerced, tag);
+        return Ok(TypedValue {
+            value: coerced,
+            tag: Some(tag.clone()),
+            is_literal: false,
+        });
+    }
+
+    Err(RuntimeError::new(format!(
+        "Expected value of type {}, got {}",
+        tag.describe(),
+        actual.describe()
+    )))
+}
+
 fn path_expr_to_name(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Identifier { name, .. } => Some(name.clone()),
@@ -891,21 +1448,12 @@ impl DerefMut for VecValue {
 }
 
 #[derive(Clone, Debug)]
-pub struct SetValue {
+pub struct ArrayValue {
     pub elem_type: Option<TypeTag>,
     pub items: Vec<Value>,
 }
 
-impl SetValue {
-    fn new(elem_type: Option<TypeTag>) -> Self {
-        Self {
-            elem_type,
-            items: Vec::new(),
-        }
-    }
-}
-
-impl Deref for SetValue {
+impl Deref for ArrayValue {
     type Target = Vec<Value>;
 
     fn deref(&self) -> &Self::Target {
@@ -913,9 +1461,41 @@ impl Deref for SetValue {
     }
 }
 
-impl DerefMut for SetValue {
+impl DerefMut for ArrayValue {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.items
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MapKey {
+    Str(String),
+    Int(i128),
+    Bool(bool),
+}
+
+impl MapKey {
+    fn describe(&self) -> &'static str {
+        match self {
+            MapKey::Str(_) => "str",
+            MapKey::Int(_) => "int",
+            MapKey::Bool(_) => "bool",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SetValue {
+    pub elem_type: Option<TypeTag>,
+    pub items: HashSet<MapKey>,
+}
+
+impl SetValue {
+    fn new(elem_type: Option<TypeTag>) -> Self {
+        Self {
+            elem_type,
+            items: HashSet::new(),
+        }
     }
 }
 
@@ -923,7 +1503,7 @@ impl DerefMut for SetValue {
 pub struct MapValue {
     pub key_type: Option<TypeTag>,
     pub value_type: Option<TypeTag>,
-    pub entries: HashMap<String, Value>,
+    pub entries: HashMap<MapKey, Value>,
 }
 
 impl MapValue {
@@ -937,7 +1517,7 @@ impl MapValue {
 }
 
 impl Deref for MapValue {
-    type Target = HashMap<String, Value>;
+    type Target = HashMap<MapKey, Value>;
 
     fn deref(&self) -> &Self::Target {
         &self.entries
@@ -950,14 +1530,40 @@ impl DerefMut for MapValue {
     }
 }
 
+fn map_key_from_value(value: &Value, context: &str) -> RuntimeResult<MapKey> {
+    match value {
+        Value::String(s) => Ok(MapKey::Str(s.clone())),
+        Value::Int(i) => Ok(MapKey::Int(*i)),
+        Value::Bool(b) => Ok(MapKey::Bool(*b)),
+        _ => Err(RuntimeError::new(format!(
+            "{context}: map/set key type not supported (use str/int/bool)"
+        ))),
+    }
+}
+
+fn map_key_to_value(key: &MapKey, preferred: Option<&TypeTag>) -> Value {
+    match (key, preferred) {
+        (MapKey::Str(s), Some(TypeTag::Primitive(PrimitiveType::String))) => {
+            Value::String(s.clone())
+        }
+        (MapKey::Int(i), Some(TypeTag::Primitive(PrimitiveType::Int(_)))) => Value::Int(*i),
+        (MapKey::Bool(b), Some(TypeTag::Primitive(PrimitiveType::Bool))) => Value::Bool(*b),
+        (MapKey::Str(s), _) => Value::String(s.clone()),
+        (MapKey::Int(i), _) => Value::Int(*i),
+        (MapKey::Bool(b), _) => Value::Bool(*b),
+    }
+}
+
 #[derive(Clone)]
 pub enum Value {
     Null,
     Bool(bool),
-    Int(i64),
+    Int(i128),
     Float(f64),
+    Char(char),
     String(String),
     Vec(Rc<RefCell<VecValue>>),
+    Array(Rc<RefCell<ArrayValue>>),
     Map(Rc<RefCell<MapValue>>),
     Set(Rc<RefCell<SetValue>>),
     Result(ResultValue),
@@ -972,6 +1578,15 @@ pub enum Value {
     Module(ModuleValue),
     Native(NativeBinding),
     Java(JavaBinding),
+    EnumConstructor(String, String),
+    TraitMethod(TraitMethodValue),
+}
+
+#[derive(Clone, Debug)]
+struct TypedValue {
+    value: Value,
+    tag: Option<TypeTag>,
+    is_literal: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1481,10 +2096,12 @@ impl fmt::Debug for Value {
             Value::Bool(v) => write!(f, "{v}"),
             Value::Int(v) => write!(f, "{v}"),
             Value::Float(v) => write!(f, "{v}"),
+            Value::Char(v) => write!(f, "{v}"),
             Value::String(v) => write!(f, "{v:?}"),
             Value::Vec(vec) => write!(f, "<vec len={}>", vec.borrow().len()),
+            Value::Array(arr) => write!(f, "<array len={}>", arr.borrow().len()),
             Value::Map(map) => write!(f, "<map len={}>", map.borrow().len()),
-            Value::Set(set) => write!(f, "<set len={}>", set.borrow().len()),
+            Value::Set(set) => write!(f, "<set len={}>", set.borrow().items.len()),
             Value::Result(res) => write!(f, "<result {:?}>", res),
             Value::Option(opt) => write!(f, "<option {:?}>", opt),
             Value::Future(_) => write!(f, "<future>"),
@@ -1497,6 +2114,8 @@ impl fmt::Debug for Value {
             Value::Module(m) => write!(f, "<module {}>", m.name),
             Value::Native(binding) => write!(f, "<native {}>", binding.name),
             Value::Java(binding) => write!(f, "<java {}>", binding.name),
+            Value::EnumConstructor(e, v) => write!(f, "<constructor {}::{}>", e, v),
+            Value::TraitMethod(m) => write!(f, "<trait {}::{}>", m.trait_name, m.signature.name),
         }
     }
 }
@@ -1508,8 +2127,10 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::Int(_) => "int",
             Value::Float(_) => "float",
+            Value::Char(_) => "char",
             Value::String(_) => "str",
             Value::Vec(_) => "vec",
+            Value::Array(_) => "array",
             Value::Map(_) => "map",
             Value::Set(_) => "set",
             Value::Result(_) => "result",
@@ -1524,6 +2145,8 @@ impl Value {
             Value::Module(_) => "module",
             Value::Native(_) => "native",
             Value::Java(_) => "java",
+            Value::EnumConstructor(..) => "constructor",
+            Value::TraitMethod(_) => "trait_method",
         }
     }
 
@@ -1533,10 +2156,12 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Int(i) => *i != 0,
             Value::Float(f) => *f != 0.0,
+            Value::Char(_) => true,
             Value::String(s) => !s.is_empty(),
             Value::Vec(vec) => !vec.borrow().is_empty(),
+            Value::Array(arr) => !arr.borrow().is_empty(),
             Value::Map(map) => !map.borrow().is_empty(),
-            Value::Set(set) => !set.borrow().is_empty(),
+            Value::Set(set) => !set.borrow().items.is_empty(),
             Value::Result(res) => matches!(res, ResultValue::Ok { .. }),
             Value::Option(opt) => matches!(opt, OptionValue::Some { .. }),
             Value::Future(_)
@@ -1548,7 +2173,7 @@ impl Value {
             Value::Struct(_) => true,
             Value::Enum(_) => true,
             Value::Tuple(t) => !t.is_empty(),
-            Value::Closure(_) => true,
+            Value::Closure(_) | Value::EnumConstructor(..) | Value::TraitMethod(_) => true,
         }
     }
 
@@ -1558,6 +2183,7 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Int(i) => i.to_string(),
             Value::Float(f) => f.to_string(),
+            Value::Char(c) => c.to_string(),
             Value::String(s) => s.clone(),
             Value::Vec(vec) => {
                 let items = vec
@@ -1566,34 +2192,41 @@ impl Value {
                     .map(|v| v.to_string_value())
                     .collect::<Vec<_>>()
                     .join(", ");
+                format!("vec[{items}]")
+            }
+            Value::Array(arr) => {
+                let items = arr
+                    .borrow()
+                    .iter()
+                    .map(|v| v.to_string_value())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("[{items}]")
             }
             Value::Set(set) => {
-                let items = set
-                    .borrow()
+                let set_ref = set.borrow();
+                let items = set_ref
+                    .items
                     .iter()
-                    .map(|v| v.to_string_value())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{{{items}}}")
-            }
-            Value::Map(map) => {
-                let items = map
-                    .borrow()
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_string_value()))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{{ {items} }}")
-            }
-            Value::Set(set) => {
-                let items = set
-                    .borrow()
-                    .iter()
-                    .map(|v| v.to_string_value())
+                    .map(|k| map_key_to_value(k, set_ref.elem_type.as_ref()).to_string_value())
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("set{{{items}}}")
+            }
+            Value::Map(map) => {
+                let map_ref = map.borrow();
+                let items = map_ref
+                    .iter()
+                    .map(|(k, v)| {
+                        format!(
+                            "{}: {}",
+                            map_key_to_value(k, map_ref.key_type.as_ref()).to_string_value(),
+                            v.to_string_value()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{ {items} }}")
             }
             Value::Result(ResultValue::Ok { value, .. }) => {
                 format!("Ok({})", value.to_string_value())
@@ -1642,6 +2275,8 @@ impl Value {
             Value::Module(m) => format!("<module {}>", m.name),
             Value::Native(binding) => format!("<native {}>", binding.name),
             Value::Java(binding) => format!("<java {}>", binding.name),
+            Value::EnumConstructor(e, v) => format!("<enum constructor {}::{}>", e, v),
+            Value::TraitMethod(m) => format!("<trait {}::{}>", m.trait_name, m.signature.name),
         }
     }
 }
@@ -1650,6 +2285,12 @@ impl Value {
 pub struct ModuleValue {
     pub name: String,
     pub fields: HashMap<String, Value>,
+}
+
+#[derive(Clone)]
+pub struct TraitMethodValue {
+    pub trait_name: String,
+    pub signature: FunctionSignature,
 }
 
 #[derive(Clone, Debug)]
@@ -1671,11 +2312,19 @@ pub struct Interpreter {
     module_loader: ModuleLoader,
     modules: HashMap<String, ModuleValue>,
     type_bindings: Vec<HashMap<String, TypeTag>>,
+    struct_defs: HashMap<String, StructSchema>,
+    enum_defs: HashMap<String, EnumSchema>,
+    trait_defs: HashMap<String, TraitDef>,
+    inherent_impls: HashMap<String, HashMap<String, UserFunction>>,
+    trait_impls: HashMap<String, HashMap<String, HashMap<String, UserFunction>>>,
+    return_type_stack: Vec<Option<TypeTag>>,
 }
 
 enum ExecSignal {
     None,
     Return(Value),
+    Break,
+    Continue,
 }
 
 impl Interpreter {
@@ -1695,13 +2344,20 @@ impl Interpreter {
             module_loader,
             modules: HashMap::new(),
             type_bindings: Vec::new(),
+            struct_defs: HashMap::new(),
+            enum_defs: HashMap::new(),
+            trait_defs: HashMap::new(),
+            inherent_impls: HashMap::new(),
+            trait_impls: HashMap::new(),
+            return_type_stack: Vec::new(),
         }
     }
 
     pub fn register_file(&mut self, ast: &File) -> RuntimeResult<()> {
         let globals = self.globals.clone();
         self.bind_imports(&ast.imports, &globals)?;
-        let _ = self.load_functions_into_env(&globals, ast)?;
+        self.register_item_definitions(&globals, &ast.items)?;
+        let _ = self.load_items_into_env(&globals, ast)?;
         Ok(())
     }
 
@@ -1710,9 +2366,114 @@ impl Interpreter {
         self.invoke(value, args, None)
     }
 
+    fn register_item_definitions(&mut self, env: &Env, items: &[Item]) -> RuntimeResult<()> {
+        for item in items {
+            match item {
+                Item::Struct(def) => {
+                    let mut fields = HashMap::new();
+                    for field in &def.fields {
+                        let tag = type_tag_from_type_expr(&field.ty);
+                        fields.insert(field.name.clone(), tag);
+                    }
+                    self.struct_defs.insert(
+                        def.name.clone(),
+                        StructSchema {
+                            name: def.name.clone(),
+                            fields,
+                        },
+                    );
+                }
+                Item::Enum(def) => {
+                    let mut variants = HashMap::new();
+                    for variant in &def.variants {
+                        let tags = variant
+                            .payload
+                            .iter()
+                            .map(type_tag_from_type_expr)
+                            .collect::<Vec<_>>();
+                        variants.insert(variant.name.clone(), tags);
+                    }
+                    self.enum_defs.insert(
+                        def.name.clone(),
+                        EnumSchema {
+                            name: def.name.clone(),
+                            variants,
+                        },
+                    );
+                }
+                Item::Trait(def) => {
+                    self.trait_defs.insert(def.name.clone(), def.clone());
+                    let mut fields = HashMap::new();
+                    for method in &def.methods {
+                        fields.insert(
+                            method.name.clone(),
+                            Value::TraitMethod(TraitMethodValue {
+                                trait_name: def.name.clone(),
+                                signature: method.clone(),
+                            }),
+                        );
+                    }
+                    env.define(
+                        def.name.clone(),
+                        Value::Module(ModuleValue {
+                            name: def.name.clone(),
+                            fields,
+                        }),
+                    );
+                }
+                Item::Impl(imp) => {
+                    let target_tag = type_tag_from_type_expr(&imp.target);
+                    let type_key = target_tag.describe();
+                    let trait_key = imp
+                        .trait_type
+                        .as_ref()
+                        .map(|t| type_tag_from_type_expr(t).describe());
+                    for method in &imp.methods {
+                        if method.signature.params.is_empty() {
+                            return Err(RuntimeError::new(format!(
+                                "method `{}` must take at least `self` parameter",
+                                method.signature.name
+                            )));
+                        }
+                        let func = UserFunction {
+                            name: method.signature.name.clone(),
+                            params: method.signature.params.clone(),
+                            body: method.body.clone(),
+                            is_async: method.signature.is_async,
+                            env: env.clone(),
+                            type_params: method
+                                .signature
+                                .type_params
+                                .iter()
+                                .map(|p| p.name.clone())
+                                .collect(),
+                            return_type: method.signature.return_type.clone(),
+                            forced_type_args: None,
+                        };
+                        let method_map = if let Some(trait_name) = &trait_key {
+                            self.trait_impls
+                                .entry(trait_name.clone())
+                                .or_default()
+                                .entry(type_key.clone())
+                                .or_default()
+                        } else {
+                            self.inherent_impls.entry(type_key.clone()).or_default()
+                        };
+                        method_map.insert(method.signature.name.clone(), func);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     pub fn run(&mut self, ast: &File) -> RuntimeResult<()> {
         self.register_file(ast)?;
-        let apex_val = self.globals.get("apex")?;
+        let apex_val = match self.globals.get("apex") {
+            Ok(val) => val,
+            Err(_) => return Err(RuntimeError::new("entrypoint `apex` not found")),
+        };
         eprintln!("[interp] invoking apex");
         match apex_val {
             Value::Function(func) => {
@@ -1733,31 +2494,61 @@ impl Interpreter {
         }
     }
 
-    fn load_functions_into_env(
+    fn load_items_into_env(
         &mut self,
         env: &Env,
         ast: &File,
     ) -> RuntimeResult<HashMap<String, Value>> {
         let mut defined = HashMap::new();
         for item in &ast.items {
-            if let Item::Function(func) = item {
-                let value = Value::Function(UserFunction {
-                    name: func.signature.name.clone(),
-                    params: func.signature.params.clone(),
-                    body: func.body.clone(),
-                    is_async: func.signature.is_async,
-                    env: env.clone(),
-                    type_params: func
-                        .signature
-                        .type_params
-                        .iter()
-                        .map(|p| p.name.clone())
-                        .collect(),
-                    return_type: func.signature.return_type.clone(),
-                    forced_type_args: None,
-                });
-                env.define(func.signature.name.clone(), value.clone());
-                defined.insert(func.signature.name.clone(), value);
+            match item {
+                Item::Function(func) => {
+                    let value = Value::Function(UserFunction {
+                        name: func.signature.name.clone(),
+                        params: func.signature.params.clone(),
+                        body: func.body.clone(),
+                        is_async: func.signature.is_async,
+                        env: env.clone(),
+                        type_params: func
+                            .signature
+                            .type_params
+                            .iter()
+                            .map(|p| p.name.clone())
+                            .collect(),
+                        return_type: func.signature.return_type.clone(),
+                        forced_type_args: None,
+                    });
+                    env.define(func.signature.name.clone(), value.clone());
+                    defined.insert(func.signature.name.clone(), value);
+                }
+                Item::Enum(enum_def) => {
+                    let mut fields = HashMap::new();
+                    for variant in &enum_def.variants {
+                        if variant.payload.is_empty() {
+                            fields.insert(
+                                variant.name.clone(),
+                                Value::Enum(EnumInstance {
+                                    name: Some(enum_def.name.clone()),
+                                    variant: variant.name.clone(),
+                                    payload: vec![],
+                                    type_params: vec![],
+                                }),
+                            );
+                        } else {
+                            fields.insert(
+                                variant.name.clone(),
+                                Value::EnumConstructor(enum_def.name.clone(), variant.name.clone()),
+                            );
+                        }
+                    }
+                    let module = Value::Module(ModuleValue {
+                        name: enum_def.name.clone(),
+                        fields,
+                    });
+                    env.define(enum_def.name.clone(), module.clone());
+                    defined.insert(enum_def.name.clone(), module);
+                }
+                _ => {}
             }
         }
         Ok(defined)
@@ -1767,21 +2558,59 @@ impl Interpreter {
         for import in imports {
             let module_name = import.path.join(".");
             if let Some(value) = self.resolve_builtin_import(&import.path) {
+                if let Some(member) = &import.member {
+                    let module = match value {
+                        Value::Module(m) => m,
+                        _ => {
+                            return Err(RuntimeError::new(format!(
+                                "builtin import `{module_name}` is not a module"
+                            )))
+                        }
+                    };
+                    let field = module.fields.get(member).cloned().ok_or_else(|| {
+                        RuntimeError::new(format!(
+                            "unknown member `{}` in module `{}`",
+                            member, module.name
+                        ))
+                    })?;
+                    let binding = import
+                        .alias
+                        .clone()
+                        .or_else(|| Some(member.clone()))
+                        .ok_or_else(|| RuntimeError::new("invalid import binding"))?;
+                    env.define(binding, field);
+                } else {
+                    let binding = import
+                        .alias
+                        .clone()
+                        .or_else(|| import.path.last().cloned())
+                        .ok_or_else(|| RuntimeError::new("invalid import path"))?;
+                    env.define(binding, value);
+                }
+                continue;
+            }
+            let module = self.load_module_value(&module_name)?;
+            if let Some(member) = &import.member {
+                let field = module.fields.get(member).cloned().ok_or_else(|| {
+                    RuntimeError::new(format!(
+                        "unknown member `{}` in module `{}`",
+                        member, module.name
+                    ))
+                })?;
+                let binding = import
+                    .alias
+                    .clone()
+                    .or_else(|| Some(member.clone()))
+                    .ok_or_else(|| RuntimeError::new("invalid import binding"))?;
+                env.define(binding, field);
+            } else {
                 let binding = import
                     .alias
                     .clone()
                     .or_else(|| import.path.last().cloned())
                     .ok_or_else(|| RuntimeError::new("invalid import path"))?;
-                env.define(binding, value);
-                continue;
+                env.define(binding, Value::Module(module));
             }
-            let module = self.load_module_value(&module_name)?;
-            let binding = import
-                .alias
-                .clone()
-                .or_else(|| import.path.last().cloned())
-                .ok_or_else(|| RuntimeError::new("invalid import path"))?;
-            env.define(binding, Value::Module(module));
         }
         Ok(())
     }
@@ -1794,7 +2623,7 @@ impl Interpreter {
             Ok(loaded) => {
                 let module_env = self.globals.child();
                 self.bind_imports(&loaded.ast.imports, &module_env)?;
-                let fields = self.load_functions_into_env(&module_env, &loaded.ast)?;
+                let fields = self.load_items_into_env(&module_env, &loaded.ast)?;
                 ModuleValue {
                     name: loaded.name.clone(),
                     fields,
@@ -1961,31 +2790,71 @@ impl Interpreter {
         Err(RuntimeError::new("FFI exports are not implemented yet"))
     }
 
-    fn execute_block(&mut self, block: &Block, env: Env) -> RuntimeResult<ExecSignal> {
+    fn execute_block(
+        &mut self,
+        block: &Block,
+        env: Env,
+        loop_depth: usize,
+    ) -> RuntimeResult<ExecSignal> {
         let mut signal = ExecSignal::None;
         let local_env = env.child();
         for stmt in &block.statements {
-            signal = self.execute_stmt(stmt, &local_env)?;
-            if matches!(signal, ExecSignal::Return(_)) {
+            match self.execute_stmt(stmt, &local_env, loop_depth) {
+                Ok(sig) => {
+                    signal = sig;
+                }
+                Err(err) => {
+                    if let RuntimeError::Propagate { ref value, .. } = err {
+                        if let Some(ret) = self.return_type_stack.last() {
+                            if matches!(ret, Some(TypeTag::Option(_)))
+                                && matches!(value, Value::Option(OptionValue::None { .. }))
+                            {
+                                return Ok(ExecSignal::Return(value.clone()));
+                            }
+                        }
+                    }
+                    return Err(err);
+                }
+            }
+            if !matches!(signal, ExecSignal::None) {
                 break;
             }
         }
         Ok(signal)
     }
 
-    fn execute_stmt(&mut self, stmt: &Stmt, env: &Env) -> RuntimeResult<ExecSignal> {
-        match stmt {
+    fn execute_stmt(
+        &mut self,
+        stmt: &Stmt,
+        env: &Env,
+        loop_depth: usize,
+    ) -> RuntimeResult<ExecSignal> {
+        let result = match stmt {
             Stmt::VarDecl(var) => {
-                let mut value = self.eval_expr(&var.value, env)?;
-                if let Some(ty) = &var.ty {
-                    let tag = if let Some(bindings) = self.type_bindings.last() {
+                let typed = if matches!(var.kind, VarKind::Const) {
+                    self.eval_const_expr_typed(&var.value)?
+                } else {
+                    self.eval_expr_typed(&var.value, env)?
+                };
+                let declared_tag = var.ty.as_ref().map(|ty| {
+                    if let Some(bindings) = self.type_bindings.last() {
                         type_tag_from_type_expr_with_bindings(ty, bindings)
                     } else {
                         type_tag_from_type_expr(ty)
-                    };
-                    apply_type_tag_to_value(&mut value, &tag);
-                }
-                env.define(var.name.clone(), value);
+                    }
+                });
+                let final_value = if let Some(tag) = &declared_tag {
+                    coerce_typed_to_tag(typed, tag)?
+                } else {
+                    typed
+                };
+                let inferred_tag = declared_tag.or_else(|| {
+                    final_value
+                        .tag
+                        .clone()
+                        .or_else(|| Some(value_type_tag(&final_value.value)))
+                });
+                env.define_var(var.name.clone(), var.kind, final_value.value, inferred_tag)?;
                 Ok(ExecSignal::None)
             }
             Stmt::Expr(expr) => {
@@ -2001,17 +2870,20 @@ impl Interpreter {
                 Ok(ExecSignal::Return(result))
             }
             Stmt::If(if_stmt) => {
-                if self.eval_expr(&if_stmt.condition, env)?.is_truthy() {
-                    let signal = self.execute_block(&if_stmt.then_branch, env.clone())?;
-                    if let ExecSignal::Return(_) = signal {
+                let cond = self.eval_expr_typed(&if_stmt.condition, env)?;
+                if expect_bool_value(cond.value, "if condition")? {
+                    let signal =
+                        self.execute_block(&if_stmt.then_branch, env.clone(), loop_depth)?;
+                    if !matches!(signal, ExecSignal::None) {
                         return Ok(signal);
                     }
                 } else {
                     let mut executed = false;
                     for (cond, block) in &if_stmt.else_if {
-                        if self.eval_expr(cond, env)?.is_truthy() {
-                            let signal = self.execute_block(block, env.clone())?;
-                            if let ExecSignal::Return(_) = signal {
+                        let cond_val = self.eval_expr_typed(cond, env)?;
+                        if expect_bool_value(cond_val.value, "else-if condition")? {
+                            let signal = self.execute_block(block, env.clone(), loop_depth)?;
+                            if !matches!(signal, ExecSignal::None) {
                                 return Ok(signal);
                             }
                             executed = true;
@@ -2020,8 +2892,8 @@ impl Interpreter {
                     }
                     if !executed {
                         if let Some(block) = &if_stmt.else_branch {
-                            let signal = self.execute_block(block, env.clone())?;
-                            if let ExecSignal::Return(_) = signal {
+                            let signal = self.execute_block(block, env.clone(), loop_depth)?;
+                            if !matches!(signal, ExecSignal::None) {
                                 return Ok(signal);
                             }
                         }
@@ -2032,10 +2904,17 @@ impl Interpreter {
             Stmt::While {
                 condition, body, ..
             } => {
-                while self.eval_expr(condition, env)?.is_truthy() {
-                    let signal = self.execute_block(body, env.clone())?;
-                    if let ExecSignal::Return(_) = signal {
-                        return Ok(signal);
+                loop {
+                    let cond = self.eval_expr_typed(condition, env)?;
+                    if !expect_bool_value(cond.value, "while condition")? {
+                        break;
+                    }
+                    let signal = self.execute_block(body, env.clone(), loop_depth + 1)?;
+                    match signal {
+                        ExecSignal::Return(_) => return Ok(signal),
+                        ExecSignal::Break => break,
+                        ExecSignal::Continue => continue,
+                        ExecSignal::None => {}
                     }
                 }
                 Ok(ExecSignal::None)
@@ -2048,32 +2927,55 @@ impl Interpreter {
             } => {
                 let iterable_value = self.eval_expr(iterable, env)?;
                 let items = self.collect_iterable(iterable_value)?;
-                println!("debug for items len {}", items.len());
                 for item in items {
-                    println!("debug iter {:?}", item);
                     let loop_env = env.child();
                     loop_env.define(var.clone(), item);
-                    let signal = self.execute_block(body, loop_env)?;
-                    if let ExecSignal::Return(_) = signal {
-                        return Ok(signal);
+                    let signal = self.execute_block(body, loop_env, loop_depth + 1)?;
+                    match signal {
+                        ExecSignal::Return(_) => return Ok(signal),
+                        ExecSignal::Break => break,
+                        ExecSignal::Continue => continue,
+                        ExecSignal::None => {}
                     }
                 }
                 Ok(ExecSignal::None)
             }
+            Stmt::Break(span) => {
+                if loop_depth == 0 {
+                    Err(RuntimeError::new("break used outside of a loop").with_span(*span))
+                } else {
+                    Ok(ExecSignal::Break)
+                }
+            }
+            Stmt::Continue(span) => {
+                if loop_depth == 0 {
+                    Err(RuntimeError::new("continue used outside of a loop").with_span(*span))
+                } else {
+                    Ok(ExecSignal::Continue)
+                }
+            }
             Stmt::Switch(switch_stmt) => self.execute_switch(switch_stmt, env),
-            Stmt::Try(try_stmt) => self.execute_try(try_stmt, env),
-            Stmt::Block(block) => self.execute_block(block, env.clone()),
-            other => Err(RuntimeError::new(format!(
-                "Statement not supported in runtime yet: {other:?}"
+            Stmt::Try(try_stmt) => self.execute_try(try_stmt, env, loop_depth),
+            Stmt::Block(block) => self.execute_block(block, env.clone(), loop_depth),
+            Stmt::Unsafe { body, .. } => self.execute_block(body, env.clone(), loop_depth),
+            Stmt::Assembly(block) => Err(RuntimeError::new(format!(
+                "assembly blocks are not supported yet: {} bytes",
+                block.body.len()
             ))),
-        }
+        };
+        result.map_err(|err| {
+            err.with_span(stmt_span(stmt))
+                .with_context("while executing statement")
+        })
     }
 
     fn collect_iterable(&self, value: Value) -> RuntimeResult<Vec<Value>> {
         match value {
             Value::Vec(vec_rc) => Ok(clone_vec_items(&vec_rc)),
+            Value::Array(arr_rc) => Ok(arr_rc.borrow().iter().cloned().collect()),
             other => Err(RuntimeError::new(format!(
-                "for-loop expects vec iterable, got {other:?}"
+                "for-loop expects vec or array iterable, got {}",
+                other.type_name()
             ))),
         }
     }
@@ -2093,19 +2995,24 @@ impl Interpreter {
         Ok(ExecSignal::None)
     }
 
-    fn execute_try(&mut self, try_stmt: &TryCatch, env: &Env) -> RuntimeResult<ExecSignal> {
-        match self.execute_block(&try_stmt.try_block, env.clone()) {
+    fn execute_try(
+        &mut self,
+        try_stmt: &TryCatch,
+        env: &Env,
+        loop_depth: usize,
+    ) -> RuntimeResult<ExecSignal> {
+        match self.execute_block(&try_stmt.try_block, env.clone(), loop_depth) {
             Ok(signal) => Ok(signal),
             Err(err) => {
                 let mut catch_value = Value::String(err.to_string());
-                if let RuntimeError::Propagate(val) = err {
-                    catch_value = val;
+                if let Some(value) = err.propagated_value() {
+                    catch_value = value;
                 }
                 let catch_env = env.child();
                 if let Some(binding) = &try_stmt.catch_binding {
                     catch_env.define(binding.clone(), catch_value);
                 }
-                self.execute_block(&try_stmt.catch_block, catch_env)
+                self.execute_block(&try_stmt.catch_block, catch_env, loop_depth)
             }
         }
     }
@@ -2130,53 +3037,197 @@ impl Interpreter {
                     Ok(None)
                 }
             }
-            Pattern::Path { .. } | Pattern::Enum { .. } => Err(RuntimeError::new(
-                "enum/path patterns not supported in switch yet",
-            )),
+            Pattern::Path { segments, .. } => {
+                if let Value::Enum(e) = value {
+                    let variant = segments.last().unwrap().as_str();
+                    if e.variant == variant {
+                        if segments.len() == 1
+                            || e.name.as_deref() == segments.first().map(|s| s.as_str())
+                        {
+                            return Ok(Some(HashMap::new()));
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            Pattern::Enum { path, bindings, .. } => {
+                if let Value::Enum(e) = value {
+                    let variant = path.last().unwrap().as_str();
+                    if e.variant != variant {
+                        return Ok(None);
+                    }
+                    if path.len() > 1 {
+                        if let Some(name) = &e.name {
+                            if name != path.first().unwrap() {
+                                return Ok(None);
+                            }
+                        }
+                    }
+                    if bindings.len() != e.payload.len() {
+                        return Err(RuntimeError::new(format!(
+                            "enum pattern arity mismatch: expected {} bindings, got {}",
+                            e.payload.len(),
+                            bindings.len()
+                        )));
+                    }
+                    let mut map = HashMap::new();
+                    for (binding, value) in bindings.iter().zip(e.payload.iter()) {
+                        map.insert(binding.clone(), value.clone());
+                    }
+                    return Ok(Some(map));
+                }
+                Ok(None)
+            }
         }
     }
 
+    fn eval_block_expr(&mut self, block: &Block, env: &Env) -> RuntimeResult<Value> {
+        self.eval_block_expr_typed(block, env)
+            .map(|typed| typed.value)
+    }
+
+    fn eval_block_expr_typed(&mut self, block: &Block, env: &Env) -> RuntimeResult<TypedValue> {
+        let local_env = env.child();
+        let mut last_value = TypedValue {
+            value: Value::Null,
+            tag: Some(TypeTag::Primitive(PrimitiveType::Unit)),
+            is_literal: false,
+        };
+        for stmt in &block.statements {
+            match stmt {
+                Stmt::Expr(expr) => {
+                    last_value = self.eval_expr_typed(expr, &local_env)?;
+                }
+                other => {
+                    let signal = self.execute_stmt(other, &local_env, 0)?;
+                    match signal {
+                        ExecSignal::None => {}
+                        ExecSignal::Return(value) => {
+                            return Ok(TypedValue {
+                                tag: Some(value_type_tag(&value)),
+                                value,
+                                is_literal: false,
+                            });
+                        }
+                        ExecSignal::Break | ExecSignal::Continue => {
+                            return Err(RuntimeError::new("Control flow signal in expression"));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(last_value)
+    }
+
     fn eval_expr(&mut self, expr: &Expr, env: &Env) -> RuntimeResult<Value> {
+        self.eval_expr_typed(expr, env).map(|typed| typed.value)
+    }
+
+    fn eval_expr_typed(&mut self, expr: &Expr, env: &Env) -> RuntimeResult<TypedValue> {
+        self.eval_expr_typed_inner(expr, env).map_err(|err| {
+            err.with_span(expr.span())
+                .with_context("while evaluating expression")
+        })
+    }
+
+    fn eval_expr_typed_inner(&mut self, expr: &Expr, env: &Env) -> RuntimeResult<TypedValue> {
         match expr {
-            Expr::Literal(lit) => self.eval_literal(lit),
-            Expr::Identifier { name, .. } => env.get(name),
+            Expr::Literal(lit) => self.eval_literal_typed(lit),
+            Expr::Identifier { name, .. } => env.get_typed(name),
             Expr::Binary {
                 left, op, right, ..
-            } => {
-                let l = self.eval_expr(left, env)?;
-                let r = self.eval_expr(right, env)?;
-                self.eval_binary(*op, l, r)
-            }
-            Expr::If(if_stmt) => {
-                let cond = self.eval_expr(&if_stmt.condition, env)?;
-                if cond.is_truthy() {
-                    self.execute_block(&if_stmt.then_branch, env.child())
-                        .map(|signal| match signal {
-                            ExecSignal::Return(v) => v,
-                            ExecSignal::None => Value::Null,
-                        })
-                } else if let Some((else_cond, else_block)) = if_stmt.else_if.first() {
-                    let else_if = IfStmt {
-                        condition: else_cond.clone(),
-                        then_branch: else_block.clone(),
-                        else_if: if_stmt.else_if[1..].to_vec(),
-                        else_branch: if_stmt.else_branch.clone(),
-                        span: if_stmt.span,
+            } => match op {
+                crate::ast::BinaryOp::LogicalAnd => {
+                    let l = self.eval_expr_typed(left, env)?;
+                    let l_val = match l.value {
+                        Value::Bool(b) => b,
+                        _ => {
+                            return Err(RuntimeError::new("Logical operators expect bool operands"))
+                        }
                     };
-                    self.eval_expr(&Expr::If(Box::new(else_if)), env)
-                } else if let Some(block) = &if_stmt.else_branch {
-                    self.execute_block(block, env.child())
-                        .map(|signal| match signal {
-                            ExecSignal::Return(v) => v,
-                            ExecSignal::None => Value::Null,
-                        })
+                    if !l_val {
+                        return Ok(TypedValue {
+                            value: Value::Bool(false),
+                            tag: Some(TypeTag::Primitive(PrimitiveType::Bool)),
+                            is_literal: false,
+                        });
+                    }
+                    let r = self.eval_expr_typed(right, env)?;
+                    let r_val = match r.value {
+                        Value::Bool(b) => b,
+                        _ => {
+                            return Err(RuntimeError::new("Logical operators expect bool operands"))
+                        }
+                    };
+                    Ok(TypedValue {
+                        value: Value::Bool(r_val),
+                        tag: Some(TypeTag::Primitive(PrimitiveType::Bool)),
+                        is_literal: false,
+                    })
+                }
+                crate::ast::BinaryOp::LogicalOr => {
+                    let l = self.eval_expr_typed(left, env)?;
+                    let l_val = match l.value {
+                        Value::Bool(b) => b,
+                        _ => {
+                            return Err(RuntimeError::new("Logical operators expect bool operands"))
+                        }
+                    };
+                    if l_val {
+                        return Ok(TypedValue {
+                            value: Value::Bool(true),
+                            tag: Some(TypeTag::Primitive(PrimitiveType::Bool)),
+                            is_literal: false,
+                        });
+                    }
+                    let r = self.eval_expr_typed(right, env)?;
+                    let r_val = match r.value {
+                        Value::Bool(b) => b,
+                        _ => {
+                            return Err(RuntimeError::new("Logical operators expect bool operands"))
+                        }
+                    };
+                    Ok(TypedValue {
+                        value: Value::Bool(r_val),
+                        tag: Some(TypeTag::Primitive(PrimitiveType::Bool)),
+                        is_literal: false,
+                    })
+                }
+                _ => {
+                    let l = self.eval_expr_typed(left, env)?;
+                    let r = self.eval_expr_typed(right, env)?;
+                    self.eval_binary_typed(*op, l, r)
+                }
+            },
+            Expr::If(if_stmt) => {
+                let cond = self.eval_expr_typed(&if_stmt.condition, env)?;
+                if expect_bool_value(cond.value, "if expression condition")? {
+                    self.eval_block_expr_typed(&if_stmt.then_branch, env)
                 } else {
-                    Ok(Value::Null)
+                    let mut matched_block = None;
+                    for (cond, block) in &if_stmt.else_if {
+                        let cond_val = self.eval_expr_typed(cond, env)?;
+                        if expect_bool_value(cond_val.value, "else-if condition")? {
+                            matched_block = Some(block);
+                            break;
+                        }
+                    }
+                    if let Some(block) = matched_block {
+                        self.eval_block_expr_typed(block, env)
+                    } else if let Some(block) = &if_stmt.else_branch {
+                        self.eval_block_expr_typed(block, env)
+                    } else {
+                        Ok(TypedValue {
+                            value: Value::Null,
+                            tag: Some(TypeTag::Primitive(PrimitiveType::Unit)),
+                            is_literal: false,
+                        })
+                    }
                 }
             }
             Expr::Unary { op, expr, .. } => {
-                let value = self.eval_expr(expr, env)?;
-                self.eval_unary(*op, value)
+                let value = self.eval_expr_typed(expr, env)?;
+                self.eval_unary_typed(*op, value)
             }
             Expr::Call {
                 callee,
@@ -2184,10 +3235,10 @@ impl Interpreter {
                 type_args,
                 ..
             } => {
-                let callee_val = self.eval_expr(callee, env)?;
+                let callee_val = self.eval_expr_typed(callee, env)?.value;
                 let mut evaluated_args = Vec::with_capacity(args.len());
                 for arg in args {
-                    evaluated_args.push(self.eval_expr(arg, env)?);
+                    evaluated_args.push(self.eval_expr_typed(arg, env)?.value);
                 }
                 let explicit_types = if type_args.is_empty() {
                     None
@@ -2206,21 +3257,158 @@ impl Interpreter {
                             .collect::<Vec<_>>(),
                     )
                 };
-                self.invoke(callee_val, evaluated_args, explicit_types)
+                let result = self.invoke(callee_val, evaluated_args, explicit_types)?;
+                Ok(TypedValue {
+                    tag: Some(value_type_tag(&result)),
+                    value: result,
+                    is_literal: false,
+                })
             }
             Expr::Await { expr, .. } => {
-                let value = self.eval_expr(expr, env)?;
-                self.await_value(value)
+                let value = self.eval_expr_typed(expr, env)?.value;
+                let awaited = self.await_value(value)?;
+                Ok(TypedValue {
+                    tag: Some(value_type_tag(&awaited)),
+                    value: awaited,
+                    is_literal: false,
+                })
             }
             Expr::Assignment { target, value, .. } => {
-                let val = self.eval_expr(value, env)?;
-                if let Expr::Identifier { name, .. } = &**target {
-                    env.assign(name, val.clone())?;
-                    Ok(val)
-                } else {
-                    Err(RuntimeError::new(
-                        "Only simple identifiers are supported on assignment targets",
-                    ))
+                let val = self.eval_expr_typed(value, env)?;
+                match &**target {
+                    Expr::Identifier { name, .. } => env.assign_typed(name, val),
+                    Expr::Index { base, index, .. } => {
+                        // Support indexed assignment for vec/array when the base binding is mutable.
+                        let base_expr = &**base;
+                        let binding_name = if let Expr::Identifier { name, .. } = base_expr {
+                            Some(name.clone())
+                        } else {
+                            None
+                        };
+                        if let Some(name) = &binding_name {
+                            if !matches!(env.binding_kind(name), Some(VarKind::Var)) {
+                                return Err(RuntimeError::new(format!(
+                                    "Cannot assign through immutable binding `{name}`"
+                                )));
+                            }
+                        }
+                        let base_value = self.eval_expr_typed(base_expr, env)?.value;
+                        let idx_value = self.eval_expr_typed(index, env)?.value;
+                        let idx_raw = expect_int(&idx_value)?;
+                        let assign_result = match base_value {
+                            Value::Array(arr_rc) => {
+                                let len = arr_rc.borrow().len();
+                                if idx_raw < 0 || idx_raw as usize >= len {
+                                    Err(RuntimeError::new(format!(
+                                        "array index out of bounds: idx={} len={}",
+                                        idx_raw, len
+                                    )))
+                                } else {
+                                    let idx = idx_raw as usize;
+                                    let mut arr_mut = arr_rc.borrow_mut();
+                                    ensure_tag_match(
+                                        &arr_mut.elem_type,
+                                        &val.value,
+                                        "array assignment",
+                                    )?;
+                                    let mut new_val = val.value.clone();
+                                    if let Some(tag) = &arr_mut.elem_type {
+                                        apply_type_tag_to_value(&mut new_val, tag);
+                                    }
+                                    arr_mut[idx] = new_val;
+                                    Ok(())
+                                }
+                            }
+                            Value::Vec(vec_rc) => {
+                                let len = vec_rc.borrow().len();
+                                if idx_raw < 0 || idx_raw as usize >= len {
+                                    Err(RuntimeError::new(format!(
+                                        "vec index out of bounds: idx={} len={}",
+                                        idx_raw, len
+                                    )))
+                                } else {
+                                    let idx = idx_raw as usize;
+                                    let mut vec_mut = vec_rc.borrow_mut();
+                                    ensure_tag_match(
+                                        &vec_mut.elem_type,
+                                        &val.value,
+                                        "vec assignment",
+                                    )?;
+                                    let mut new_val = val.value.clone();
+                                    if let Some(tag) = &vec_mut.elem_type {
+                                        apply_type_tag_to_value(&mut new_val, tag);
+                                    }
+                                    vec_mut[idx] = new_val;
+                                    Ok(())
+                                }
+                            }
+                            _ => Err(RuntimeError::new(
+                                "Indexed assignment supported only on vec and array",
+                            )),
+                        }?;
+                        Ok(TypedValue {
+                            tag: val.tag.clone(),
+                            value: val.value,
+                            is_literal: false,
+                        })
+                    }
+                    Expr::Access { base, member, .. } => {
+                        if let Expr::Identifier { name, .. } = base.as_ref() {
+                            let binding = env.get_typed(name)?;
+                            let mut struct_val = match binding.value {
+                                Value::Struct(s) => s,
+                                other => {
+                                    return Err(RuntimeError::new(format!(
+                                        "Cannot assign field on non-struct value `{}`",
+                                        other.type_name()
+                                    )))
+                                }
+                            };
+                            let mut new_field = val.value.clone();
+                            if let Some(struct_name) = &struct_val.name {
+                                if let Some(schema) = self.struct_defs.get(struct_name) {
+                                    let expected = schema.fields.get(member).ok_or_else(|| {
+                                        RuntimeError::new(format!(
+                                            "Unknown field `{}` on struct `{}`",
+                                            member, struct_name
+                                        ))
+                                    })?;
+                                    ensure_tag_match(
+                                        &Some(expected.clone()),
+                                        &new_field,
+                                        "struct field assignment",
+                                    )?;
+                                    apply_type_tag_to_value(&mut new_field, expected);
+                                }
+                            }
+                            if !struct_val.fields.contains_key(member) {
+                                return Err(RuntimeError::new(format!(
+                                    "Unknown field `{}` on struct value",
+                                    member
+                                )));
+                            }
+                            struct_val.fields.insert(member.clone(), new_field);
+                            let new_struct_value = Value::Struct(struct_val);
+                            let tag = binding
+                                .tag
+                                .clone()
+                                .or_else(|| Some(value_type_tag(&new_struct_value)));
+                            let updated = TypedValue {
+                                tag,
+                                value: new_struct_value,
+                                is_literal: false,
+                            };
+                            env.assign_typed(name, updated.clone())?;
+                            Ok(updated)
+                        } else {
+                            Err(RuntimeError::new(
+                                "Assignment target must be identifier, index, or struct field",
+                            ))
+                        }
+                    }
+                    _ => Err(RuntimeError::new(
+                        "Only simple identifiers or indexing are supported on assignment targets",
+                    )),
                 }
             }
             Expr::StructLiteral {
@@ -2230,11 +3418,47 @@ impl Interpreter {
                 ..
             } => {
                 let mut map = HashMap::new();
+                let mut seen = HashSet::new();
+                let type_name = path_expr_to_name(path);
+                if let Some(name) = &type_name {
+                    if !self.struct_defs.contains_key(name) {
+                        return Err(RuntimeError::new(format!("Unknown struct `{name}`")));
+                    }
+                }
                 for field in fields {
-                    let value = self.eval_expr(&field.expr, env)?;
+                    if !seen.insert(field.name.clone()) {
+                        return Err(RuntimeError::new(format!(
+                            "Duplicate field `{}` in struct literal",
+                            field.name
+                        )));
+                    }
+                    let mut value = self.eval_expr_typed(&field.expr, env)?.value;
+                    if let Some(name) = &type_name {
+                        if let Some(schema) = self.struct_defs.get(name) {
+                            let expected = schema.fields.get(&field.name).ok_or_else(|| {
+                                RuntimeError::new(format!(
+                                    "Unknown field `{}` for struct `{}`",
+                                    field.name, name
+                                ))
+                            })?;
+                            ensure_tag_match(&Some(expected.clone()), &value, "struct literal")?;
+                            apply_type_tag_to_value(&mut value, expected);
+                        }
+                    }
                     map.insert(field.name.clone(), value);
                 }
-                let type_name = path_expr_to_name(path);
+                if let Some(name) = &type_name {
+                    if let Some(schema) = self.struct_defs.get(name) {
+                        for key in schema.fields.keys() {
+                            if !map.contains_key(key) {
+                                return Err(RuntimeError::new(format!(
+                                    "Missing field `{}` for struct `{}`",
+                                    key, name
+                                )));
+                            }
+                        }
+                    }
+                }
                 let mut struct_value = Value::Struct(StructInstance {
                     name: type_name.clone(),
                     type_params: Vec::new(),
@@ -2255,85 +3479,204 @@ impl Interpreter {
                     let tag = TypeTag::Struct { name, params };
                     apply_type_tag_to_value(&mut struct_value, &tag);
                 }
-                Ok(struct_value)
+                Ok(TypedValue {
+                    tag: Some(value_type_tag(&struct_value)),
+                    value: struct_value,
+                    is_literal: false,
+                })
             }
             Expr::ArrayLiteral { elements, .. } => {
-                let mut arr = Vec::new();
+                let mut items = Vec::new();
+                let mut elem_tag: Option<TypeTag> = None;
+                let mut mixed = false;
                 for elem in elements {
-                    arr.push(self.eval_expr(elem, env)?);
+                    let typed = self.eval_expr_typed(elem, env)?;
+                    if let Some(tag) = &typed.tag {
+                        match &elem_tag {
+                            Some(existing) if existing != tag => mixed = true,
+                            None => elem_tag = Some(tag.clone()),
+                            _ => {}
+                        }
+                    } else {
+                        mixed = true;
+                    }
+                    items.push(typed.value);
                 }
-                Ok(make_vec_value(arr, None))
-            }
-            Expr::Block(block) => {
-                let result = self.execute_block(block, env.clone())?;
-                match result {
-                    ExecSignal::Return(value) => Ok(value),
-                    ExecSignal::None => Ok(Value::Null),
+                if mixed {
+                    elem_tag = None;
                 }
+                let array_value = make_array_value(items, elem_tag.clone());
+                Ok(TypedValue {
+                    tag: Some(TypeTag::Array(
+                        Box::new(elem_tag.unwrap_or(TypeTag::Unknown)),
+                        elements.len(),
+                    )),
+                    value: array_value,
+                    is_literal: false,
+                })
             }
+            Expr::TupleLiteral { elements, .. } => {
+                let mut items = Vec::new();
+                for elem in elements {
+                    items.push(self.eval_expr_typed(elem, env)?.value);
+                }
+                Ok(TypedValue {
+                    tag: Some(TypeTag::Tuple(
+                        items.iter().map(value_type_tag).collect::<Vec<_>>(),
+                    )),
+                    value: Value::Tuple(items),
+                    is_literal: false,
+                })
+            }
+            Expr::Block(block) => self.eval_block_expr_typed(block, env),
             Expr::Try { expr, .. } => {
-                let value = self.eval_expr(expr, env)?;
-                match value {
+                let value = self.eval_expr_typed(expr, env)?.value;
+                let result = match value {
                     Value::Result(ResultValue::Ok { value, .. }) => Ok(*value),
                     Value::Result(ResultValue::Err { value, .. }) => {
                         Err(RuntimeError::propagate(*value))
                     }
                     Value::Option(OptionValue::Some { value, .. }) => Ok(*value),
                     Value::Option(OptionValue::None { elem_type }) => {
-                        Err(RuntimeError::propagate(Value::Option(OptionValue::None {
-                            elem_type: elem_type.clone(),
-                        })))
+                        let return_tag = self.return_type_stack.last().and_then(|t| t.clone());
+                        let expects_option = matches!(return_tag, Some(TypeTag::Option(_)));
+                        if expects_option {
+                            Err(RuntimeError::propagate(Value::Option(OptionValue::None {
+                                elem_type: elem_type.clone(),
+                            })))
+                        } else {
+                            Err(RuntimeError::new(
+                                "`?` on option requires function to return option<T>",
+                            ))
+                        }
                     }
                     _ => Err(RuntimeError::new("`?` expects result<T,E> or option<T>")),
-                }
+                }?;
+                Ok(TypedValue {
+                    tag: Some(value_type_tag(&result)),
+                    value: result,
+                    is_literal: false,
+                })
+            }
+            Expr::Cast { expr, ty, .. } => {
+                let inner = self.eval_expr_typed(expr, env)?;
+                let target_tag = if let Some(bindings) = self.type_bindings.last() {
+                    type_tag_from_type_expr_with_bindings(ty, bindings)
+                } else {
+                    type_tag_from_type_expr(ty)
+                };
+                cast_typed_to_tag(inner, &target_tag)
             }
             Expr::Access { base, member, .. } => {
-                let base_val = self.eval_expr(base, env)?;
-                match base_val {
-                    Value::Module(module) => module
-                        .fields
-                        .get(member)
-                        .cloned()
-                        .ok_or_else(|| RuntimeError::new(format!("Unknown member `{member}`"))),
+                let base_val = self.eval_expr_typed(base, env)?.value;
+                let value = match base_val {
+                    Value::Module(module) => {
+                        module.fields.get(member).cloned().ok_or_else(|| {
+                            RuntimeError::new(format!("Unknown member `{member}`"))
+                        })?
+                    }
                     Value::Struct(instance) => instance
                         .fields
                         .get(member)
                         .cloned()
-                        .ok_or_else(|| RuntimeError::new(format!("Unknown field `{member}`"))),
-                    _ => Err(RuntimeError::new(
-                        "Member access supported only on modules or structs",
-                    )),
-                }
+                        .ok_or_else(|| RuntimeError::new(format!("Unknown field `{member}`")))?,
+                    _ => {
+                        return Err(RuntimeError::new(
+                            "Member access supported only on modules or structs",
+                        ))
+                    }
+                };
+                Ok(TypedValue {
+                    tag: Some(value_type_tag(&value)),
+                    value,
+                    is_literal: false,
+                })
             }
             Expr::Index { base, index, .. } => {
-                let base_val = self.eval_expr(base, env)?;
-                let index_val = self.eval_expr(index, env)?;
+                let base_val = self.eval_expr_typed(base, env)?.value;
+                let index_val = self.eval_expr_typed(index, env)?.value;
                 match base_val {
                     Value::Vec(vec_rc) => {
                         let idx = match index_val {
-                            Value::Int(i) => i as usize,
+                            Value::Int(i) => int_to_usize(i, "Array index")?,
                             _ => return Err(RuntimeError::new("Array index must be integer")),
                         };
                         let vec_ref = vec_rc.borrow();
-                        vec_ref
-                            .get(idx)
-                            .cloned()
-                            .ok_or_else(|| RuntimeError::new(format!("Index {idx} out of bounds")))
+                        let item = vec_ref.get(idx).cloned().ok_or_else(|| {
+                            RuntimeError::new(format!(
+                                "index out of bounds: len={}, index={}",
+                                vec_ref.len(),
+                                idx
+                            ))
+                        })?;
+                        let tag = vec_ref
+                            .elem_type
+                            .clone()
+                            .or_else(|| Some(value_type_tag(&item)));
+                        Ok(TypedValue {
+                            tag,
+                            value: item,
+                            is_literal: false,
+                        })
+                    }
+                    Value::Array(arr_rc) => {
+                        let idx = match index_val {
+                            Value::Int(i) => int_to_usize(i, "Array index")?,
+                            _ => return Err(RuntimeError::new("Array index must be integer")),
+                        };
+                        let arr_ref = arr_rc.borrow();
+                        let item = arr_ref.get(idx).cloned().ok_or_else(|| {
+                            RuntimeError::new(format!(
+                                "index out of bounds: len={}, index={}",
+                                arr_ref.len(),
+                                idx
+                            ))
+                        })?;
+                        let tag = arr_ref
+                            .elem_type
+                            .clone()
+                            .or_else(|| Some(value_type_tag(&item)));
+                        Ok(TypedValue {
+                            tag,
+                            value: item,
+                            is_literal: false,
+                        })
                     }
                     Value::String(s) => {
                         let idx = match index_val {
-                            Value::Int(i) => i as usize,
+                            Value::Int(i) => int_to_usize(i, "String index")?,
                             _ => return Err(RuntimeError::new("String index must be integer")),
                         };
-                        s.chars()
-                            .nth(idx)
-                            .map(|c| Value::String(c.to_string()))
-                            .ok_or_else(|| {
-                                RuntimeError::new(format!("String index {idx} out of bounds"))
-                            })
+                        let ch = s.chars().nth(idx).ok_or_else(|| {
+                            RuntimeError::new(format!("String index {idx} out of bounds"))
+                        })?;
+                        Ok(TypedValue {
+                            value: Value::Char(ch),
+                            tag: Some(TypeTag::Primitive(PrimitiveType::Char)),
+                            is_literal: false,
+                        })
+                    }
+                    Value::Tuple(items) => {
+                        let idx = match index_val {
+                            Value::Int(i) => int_to_usize(i, "Tuple index")?,
+                            _ => return Err(RuntimeError::new("Tuple index must be integer")),
+                        };
+                        if idx >= items.len() {
+                            return Err(RuntimeError::new(format!(
+                                "tuple index out of bounds: idx={} len={}",
+                                idx,
+                                items.len()
+                            )));
+                        }
+                        let item = items[idx].clone();
+                        Ok(TypedValue {
+                            tag: Some(value_type_tag(&item)),
+                            value: item,
+                            is_literal: false,
+                        })
                     }
                     _ => Err(RuntimeError::new(
-                        "Indexing supported only on vec and string",
+                        "Indexing supported only on vec, array, and string",
                     )),
                 }
             }
@@ -2343,20 +3686,59 @@ impl Interpreter {
                 args,
                 ..
             } => {
-                let object_val = self.eval_expr(object, env)?;
+                let (object_val, object_mutable) = match object.as_ref() {
+                    Expr::Identifier { name, .. } => {
+                        let is_mut = matches!(env.binding_kind(name), Some(VarKind::Var));
+                        (self.eval_expr_typed(object, env)?.value, is_mut)
+                    }
+                    _ => (self.eval_expr_typed(object, env)?.value, false),
+                };
 
-                // If object is a module, call the method directly on the module
                 if let Value::Module(m) = &object_val {
                     let mut evaluated_args = Vec::new();
                     for arg in args {
-                        evaluated_args.push(self.eval_expr(arg, env)?);
+                        evaluated_args.push(self.eval_expr_typed(arg, env)?.value);
                     }
                     if let Some(member) = m.fields.get(method) {
                         let member_value = member.clone();
-                        return match member_value {
-                            Value::Builtin(func) => func(self, &evaluated_args),
-                            other => self.invoke(other, evaluated_args, None),
+                        let result = match member_value {
+                            Value::Builtin(func) => func(self, &evaluated_args)?,
+                            Value::TraitMethod(tm) => {
+                                if evaluated_args.is_empty() {
+                                    return Err(RuntimeError::new(format!(
+                                        "Trait method `{}` requires a target",
+                                        tm.signature.name
+                                    )));
+                                }
+                                let target = &evaluated_args[0];
+                                let type_key = value_type_tag(target).describe();
+                                if let Some(first) = tm.signature.params.first() {
+                                    if first.name == "self_mut" && !object_mutable {
+                                        return Err(RuntimeError::new(
+                                            "cannot borrow immutable value as mutable (method requires self_mut)",
+                                        ));
+                                    }
+                                }
+                                let func = self
+                                    .trait_impls
+                                    .get(&tm.trait_name)
+                                    .and_then(|m| m.get(&type_key))
+                                    .and_then(|m| m.get(&tm.signature.name))
+                                    .ok_or_else(|| {
+                                        RuntimeError::new(format!(
+                                            "trait bound not satisfied: {} for {}",
+                                            tm.trait_name, type_key
+                                        ))
+                                    })?;
+                                self.call_user_function(func.clone(), evaluated_args)?
+                            }
+                            other => self.invoke(other, evaluated_args, None)?,
                         };
+                        return Ok(TypedValue {
+                            tag: Some(value_type_tag(&result)),
+                            value: result,
+                            is_literal: false,
+                        });
                     } else {
                         return Err(RuntimeError::new(format!(
                             "Unknown method `{method}` on module {}",
@@ -2365,11 +3747,54 @@ impl Interpreter {
                     }
                 }
 
-                // Otherwise, convert method call to module function call
-                // e.g., obj.push(x) -> vec.push(obj, x)
                 let mut evaluated_args = vec![object_val.clone()];
                 for arg in args {
-                    evaluated_args.push(self.eval_expr(arg, env)?);
+                    evaluated_args.push(self.eval_expr_typed(arg, env)?.value);
+                }
+
+                if let Value::Struct(instance) = &object_val {
+                    let type_key = value_type_tag(&object_val).describe();
+                    if let Some(methods) = self.inherent_impls.get(&type_key) {
+                        if let Some(func) = methods.get(method) {
+                            if let Some(first) = func.params.first() {
+                                if first.name == "self_mut" && !object_mutable {
+                                    return Err(RuntimeError::new(
+                                        "cannot borrow immutable value as mutable (method requires self_mut)",
+                                    ));
+                                }
+                            }
+                            let result =
+                                self.call_user_function(func.clone(), evaluated_args.clone())?;
+                            return Ok(TypedValue {
+                                tag: Some(value_type_tag(&result)),
+                                value: result,
+                                is_literal: false,
+                            });
+                        }
+                    }
+                    return Err(RuntimeError::new(format!(
+                        "Unknown method `{}` on struct `{}`",
+                        method,
+                        instance
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| "anonymous".to_string())
+                    )));
+                }
+
+                // Allow direct methods on core collection types without requiring explicit import.
+                if let Value::Array(arr_rc) = &object_val {
+                    if method == "len" {
+                        let len = arr_rc.borrow().len() as i128;
+                        return Ok(TypedValue {
+                            tag: Some(TypeTag::Primitive(PrimitiveType::Int(IntType::I128))),
+                            value: Value::Int(len),
+                            is_literal: false,
+                        });
+                    }
+                    return Err(RuntimeError::new(format!(
+                        "Unknown method `{method}` on array"
+                    )));
                 }
 
                 let module_name = match &object_val {
@@ -2386,7 +3811,12 @@ impl Interpreter {
                 let module = env.get(module_name)?;
                 if let Value::Module(m) = module {
                     if let Some(Value::Builtin(func)) = m.fields.get(method) {
-                        func(self, &evaluated_args)
+                        let result = func(self, &evaluated_args)?;
+                        Ok(TypedValue {
+                            tag: Some(value_type_tag(&result)),
+                            value: result,
+                            is_literal: false,
+                        })
                     } else {
                         Err(RuntimeError::new(format!(
                             "Unknown method `{method}` on {module_name}"
@@ -2396,15 +3826,76 @@ impl Interpreter {
                     Err(RuntimeError::new(format!("{module_name} is not a module")))
                 }
             }
-            Expr::Lambda(lambda_expr) => Ok(Value::Closure(ClosureValue {
-                params: lambda_expr.params.iter().map(|p| p.name.clone()).collect(),
-                body: lambda_expr.body.clone(),
-                is_async: lambda_expr.is_async,
-            })),
+            Expr::Check(check_expr) => {
+                let target_value = if let Some(target) = &check_expr.target {
+                    Some(self.eval_expr_typed(target, env)?)
+                } else {
+                    None
+                };
+                for arm in &check_expr.arms {
+                    let arm_env = env.child();
+                    if let Some(target) = &target_value {
+                        arm_env.define("it".to_string(), target.value.clone());
+                    }
+                    let matched = match &arm.pattern {
+                        CheckPattern::Wildcard { .. } => true,
+                        CheckPattern::Literal(lit) => {
+                            let lit_value = self.eval_literal(lit)?;
+                            if let Some(target) = &target_value {
+                                self.values_equal(&target.value, &lit_value)
+                            } else if let Value::Bool(b) = lit_value {
+                                b
+                            } else {
+                                return Err(RuntimeError::new(
+                                    "check guard without target must be bool",
+                                ));
+                            }
+                        }
+                        CheckPattern::Guard(expr) => {
+                            let guard_val = self.eval_expr_typed(expr, &arm_env)?;
+                            expect_bool_value(guard_val.value, "check guard")?
+                        }
+                    };
+                    if matched {
+                        let result = self.eval_expr_typed(&arm.expr, &arm_env)?;
+                        return Ok(TypedValue {
+                            tag: Some(value_type_tag(&result.value)),
+                            value: result.value,
+                            is_literal: false,
+                        });
+                    }
+                }
+                Err(RuntimeError::new("check: non-exhaustive (no arm matched)"))
+            }
+            Expr::Lambda(lambda_expr) => Ok(TypedValue {
+                value: Value::Closure(ClosureValue {
+                    params: lambda_expr.params.iter().map(|p| p.name.clone()).collect(),
+                    body: lambda_expr.body.clone(),
+                    is_async: lambda_expr.is_async,
+                }),
+                tag: None,
+                is_literal: false,
+            }),
             other => Err(RuntimeError::new(format!(
                 "Expression not supported in runtime yet: {other:?}"
             ))),
         }
+    }
+
+    fn eval_literal_typed(&self, lit: &Literal) -> RuntimeResult<TypedValue> {
+        let value = self.eval_literal(lit)?;
+        let tag = match lit {
+            Literal::Integer { .. } => TypeTag::Primitive(PrimitiveType::Int(IntType::I64)),
+            Literal::Float { .. } => TypeTag::Primitive(PrimitiveType::Float(FloatType::F64)),
+            Literal::String { .. } => TypeTag::Primitive(PrimitiveType::String),
+            Literal::Char { .. } => TypeTag::Primitive(PrimitiveType::Char),
+            Literal::Bool { .. } => TypeTag::Primitive(PrimitiveType::Bool),
+        };
+        Ok(TypedValue {
+            value,
+            tag: Some(tag),
+            is_literal: true,
+        })
     }
 
     fn eval_literal(&self, lit: &Literal) -> RuntimeResult<Value> {
@@ -2412,7 +3903,7 @@ impl Interpreter {
             Literal::Integer { value, .. } => {
                 let cleaned = value.replace('_', "");
                 let parsed = cleaned
-                    .parse::<i64>()
+                    .parse::<i128>()
                     .map_err(|_| RuntimeError::new(format!("Invalid integer literal `{value}`")))?;
                 Ok(Value::Int(parsed))
             }
@@ -2423,100 +3914,274 @@ impl Interpreter {
                 Ok(Value::Float(parsed))
             }
             Literal::String { value, .. } => Ok(Value::String(value.clone())),
-            Literal::Char { value, .. } => Ok(Value::String(value.to_string())),
+            Literal::Char { value, .. } => Ok(Value::Char(*value)),
             Literal::Bool { value, .. } => Ok(Value::Bool(*value)),
         }
     }
 
-    fn eval_binary(
-        &self,
-        op: crate::ast::BinaryOp,
-        left: Value,
-        right: Value,
-    ) -> RuntimeResult<Value> {
-        use crate::ast::BinaryOp::*;
-        match op {
-            Add => self.add_values(left, right),
-            Subtract | Multiply | Divide | Modulo => {
-                let l = self.as_number(left)?;
-                let r = self.as_number(right)?;
-                let result = match op {
-                    Subtract => l - r,
-                    Multiply => l * r,
-                    Divide => l / r,
-                    Modulo => l % r,
-                    _ => unreachable!(),
-                };
-                Ok(Value::Float(result))
-            }
-            LogicalAnd => Ok(Value::Bool(left.is_truthy() && right.is_truthy())),
-            LogicalOr => Ok(Value::Bool(left.is_truthy() || right.is_truthy())),
-            Equal => Ok(Value::Bool(self.values_equal(&left, &right))),
-            NotEqual => Ok(Value::Bool(!self.values_equal(&left, &right))),
-            Less | LessEqual | Greater | GreaterEqual => {
-                let l = self.as_number(left)?;
-                let r = self.as_number(right)?;
-                let value = match op {
-                    Less => l < r,
-                    LessEqual => l <= r,
-                    Greater => l > r,
-                    GreaterEqual => l >= r,
-                    _ => unreachable!(),
-                };
-                Ok(Value::Bool(value))
-            }
-            Range => {
-                let start = self.as_number(left)? as i64;
-                let end = self.as_number(right)? as i64;
-                let mut items = Vec::new();
-                for i in start..end {
-                    items.push(Value::Int(i));
-                }
-                let vec = VecValue {
-                    elem_type: Some(TypeTag::Primitive(PrimitiveType::Int)),
-                    items,
-                };
-                Ok(Value::Vec(Rc::new(RefCell::new(vec))))
-            }
+    fn eval_const_expr_typed(&self, expr: &Expr) -> RuntimeResult<TypedValue> {
+        match expr {
+            Expr::Literal(lit) => self.eval_literal_typed(lit),
+            _ => Err(RuntimeError::new("const values must be literals")),
         }
     }
 
-    fn eval_unary(&self, op: crate::ast::UnaryOp, value: Value) -> RuntimeResult<Value> {
-        use crate::ast::UnaryOp::*;
+    fn eval_const_expr(&self, expr: &Expr) -> RuntimeResult<Value> {
+        self.eval_const_expr_typed(expr).map(|typed| typed.value)
+    }
+
+    fn eval_binary_typed(
+        &self,
+        op: crate::ast::BinaryOp,
+        left: TypedValue,
+        right: TypedValue,
+    ) -> RuntimeResult<TypedValue> {
+        use crate::ast::BinaryOp::*;
+        let left_tag = resolved_tag(&left);
+        let right_tag = resolved_tag(&right);
         match op {
-            Negate => match value {
-                Value::Int(i) => Ok(Value::Int(-i)),
-                Value::Float(f) => Ok(Value::Float(-f)),
+            LogicalAnd | LogicalOr => {
+                if !matches!(left_tag, TypeTag::Primitive(PrimitiveType::Bool))
+                    || !matches!(right_tag, TypeTag::Primitive(PrimitiveType::Bool))
+                {
+                    return Err(RuntimeError::new("Logical operators expect bool operands"));
+                }
+                let l = match left.value {
+                    Value::Bool(b) => b,
+                    _ => return Err(RuntimeError::new("Logical operands must be bool")),
+                };
+                let r = match right.value {
+                    Value::Bool(b) => b,
+                    _ => return Err(RuntimeError::new("Logical operands must be bool")),
+                };
+                let value = if matches!(op, LogicalAnd) {
+                    l && r
+                } else {
+                    l || r
+                };
+                Ok(TypedValue {
+                    value: Value::Bool(value),
+                    tag: Some(TypeTag::Primitive(PrimitiveType::Bool)),
+                    is_literal: false,
+                })
+            }
+            Equal | NotEqual => {
+                if left_tag != right_tag {
+                    return Err(RuntimeError::new(format!(
+                        "Equality expects matching types, got {} and {}",
+                        left_tag.describe(),
+                        right_tag.describe()
+                    )));
+                }
+                let equal = self.values_equal(&left.value, &right.value);
+                let value = if matches!(op, Equal) { equal } else { !equal };
+                Ok(TypedValue {
+                    value: Value::Bool(value),
+                    tag: Some(TypeTag::Primitive(PrimitiveType::Bool)),
+                    is_literal: false,
+                })
+            }
+            Less | LessEqual | Greater | GreaterEqual => match (left_tag, right_tag) {
+                (
+                    TypeTag::Primitive(PrimitiveType::Int(kind_l)),
+                    TypeTag::Primitive(PrimitiveType::Int(kind_r)),
+                ) if kind_l == kind_r => {
+                    let (a, b) = match (left.value, right.value) {
+                        (Value::Int(a), Value::Int(b)) => (a, b),
+                        _ => return Err(RuntimeError::new("Comparison expects integers")),
+                    };
+                    let value = match op {
+                        Less => a < b,
+                        LessEqual => a <= b,
+                        Greater => a > b,
+                        GreaterEqual => a >= b,
+                        _ => unreachable!(),
+                    };
+                    Ok(TypedValue {
+                        value: Value::Bool(value),
+                        tag: Some(TypeTag::Primitive(PrimitiveType::Bool)),
+                        is_literal: false,
+                    })
+                }
+                (
+                    TypeTag::Primitive(PrimitiveType::Float(kind_l)),
+                    TypeTag::Primitive(PrimitiveType::Float(kind_r)),
+                ) if kind_l == kind_r => {
+                    let (a, b) = match (left.value, right.value) {
+                        (Value::Float(a), Value::Float(b)) => (a, b),
+                        _ => return Err(RuntimeError::new("Comparison expects floats")),
+                    };
+                    let value = match op {
+                        Less => a < b,
+                        LessEqual => a <= b,
+                        Greater => a > b,
+                        GreaterEqual => a >= b,
+                        _ => unreachable!(),
+                    };
+                    Ok(TypedValue {
+                        value: Value::Bool(value),
+                        tag: Some(TypeTag::Primitive(PrimitiveType::Bool)),
+                        is_literal: false,
+                    })
+                }
+                (left_tag, right_tag) => Err(RuntimeError::new(format!(
+                    "Comparison expects matching numeric types, got {} and {}",
+                    left_tag.describe(),
+                    right_tag.describe()
+                ))),
+            },
+            Add | Subtract | Multiply | Divide | Modulo => match (left_tag, right_tag) {
+                (
+                    TypeTag::Primitive(PrimitiveType::Int(kind_l)),
+                    TypeTag::Primitive(PrimitiveType::Int(kind_r)),
+                ) if kind_l == kind_r => {
+                    let (a, b) = match (left.value, right.value) {
+                        (Value::Int(a), Value::Int(b)) => (a, b),
+                        _ => return Err(RuntimeError::new("Numeric ops expect integers")),
+                    };
+                    if matches!(op, Divide | Modulo) && b == 0 {
+                        return Err(RuntimeError::new("Division by zero"));
+                    }
+                    let result = match op {
+                        Add => a + b,
+                        Subtract => a - b,
+                        Multiply => a * b,
+                        Divide => a / b,
+                        Modulo => a % b,
+                        _ => unreachable!(),
+                    };
+                    if !kind_l.is_signed() && result < 0 {
+                        return Err(RuntimeError::new(
+                            "Unsigned integer operation produced negative value",
+                        ));
+                    }
+                    Ok(TypedValue {
+                        value: Value::Int(result),
+                        tag: Some(TypeTag::Primitive(PrimitiveType::Int(kind_l))),
+                        is_literal: false,
+                    })
+                }
+                (
+                    TypeTag::Primitive(PrimitiveType::Float(kind_l)),
+                    TypeTag::Primitive(PrimitiveType::Float(kind_r)),
+                ) if kind_l == kind_r => {
+                    let (a, b) = match (left.value, right.value) {
+                        (Value::Float(a), Value::Float(b)) => (a, b),
+                        _ => return Err(RuntimeError::new("Numeric ops expect floats")),
+                    };
+                    let result = match op {
+                        Add => a + b,
+                        Subtract => a - b,
+                        Multiply => a * b,
+                        Divide => a / b,
+                        Modulo => a % b,
+                        _ => unreachable!(),
+                    };
+                    Ok(TypedValue {
+                        value: Value::Float(result),
+                        tag: Some(TypeTag::Primitive(PrimitiveType::Float(kind_l))),
+                        is_literal: false,
+                    })
+                }
+                (left_tag, right_tag) => Err(RuntimeError::new(format!(
+                    "Numeric operators expect matching types, got {} and {}",
+                    left_tag.describe(),
+                    right_tag.describe()
+                ))),
+            },
+            Range => match (left_tag, right_tag) {
+                (
+                    TypeTag::Primitive(PrimitiveType::Int(kind_l)),
+                    TypeTag::Primitive(PrimitiveType::Int(kind_r)),
+                ) if kind_l == kind_r => {
+                    let (start, end) = match (left.value, right.value) {
+                        (Value::Int(a), Value::Int(b)) => (a, b),
+                        _ => return Err(RuntimeError::new("Range expects integer bounds")),
+                    };
+                    if !kind_l.is_signed() && (start < 0 || end < 0) {
+                        return Err(RuntimeError::new(
+                            "Range bounds must be non-negative for unsigned integers",
+                        ));
+                    }
+                    let mut items = Vec::new();
+                    let mut current = start;
+                    while current < end {
+                        items.push(Value::Int(current));
+                        current += 1;
+                    }
+                    let elem_tag = TypeTag::Primitive(PrimitiveType::Int(kind_l));
+                    let vec = VecValue {
+                        elem_type: Some(elem_tag.clone()),
+                        items,
+                    };
+                    Ok(TypedValue {
+                        value: Value::Vec(Rc::new(RefCell::new(vec))),
+                        tag: Some(TypeTag::Vec(Box::new(elem_tag))),
+                        is_literal: false,
+                    })
+                }
+                (left_tag, right_tag) => Err(RuntimeError::new(format!(
+                    "Range expects matching integer types, got {} and {}",
+                    left_tag.describe(),
+                    right_tag.describe()
+                ))),
+            },
+        }
+    }
+
+    fn eval_unary_typed(
+        &self,
+        op: crate::ast::UnaryOp,
+        value: TypedValue,
+    ) -> RuntimeResult<TypedValue> {
+        use crate::ast::UnaryOp::*;
+        let tag = resolved_tag(&value);
+        match op {
+            Negate => match tag {
+                TypeTag::Primitive(PrimitiveType::Int(kind)) => {
+                    if !kind.is_signed() {
+                        return Err(RuntimeError::new("Unary - expects signed integer"));
+                    }
+                    let v = match value.value {
+                        Value::Int(i) => i,
+                        _ => return Err(RuntimeError::new("Unary - expects integer")),
+                    };
+                    Ok(TypedValue {
+                        value: Value::Int(-v),
+                        tag: Some(TypeTag::Primitive(PrimitiveType::Int(kind))),
+                        is_literal: false,
+                    })
+                }
+                TypeTag::Primitive(PrimitiveType::Float(kind)) => {
+                    let v = match value.value {
+                        Value::Float(f) => f,
+                        _ => return Err(RuntimeError::new("Unary - expects float")),
+                    };
+                    Ok(TypedValue {
+                        value: Value::Float(-v),
+                        tag: Some(TypeTag::Primitive(PrimitiveType::Float(kind))),
+                        is_literal: false,
+                    })
+                }
                 _ => Err(RuntimeError::new("Unary - expects number")),
             },
-            Not => Ok(Value::Bool(!value.is_truthy())),
+            Not => {
+                if !matches!(tag, TypeTag::Primitive(PrimitiveType::Bool)) {
+                    return Err(RuntimeError::new("Unary ! expects bool"));
+                }
+                let v = match value.value {
+                    Value::Bool(b) => b,
+                    _ => return Err(RuntimeError::new("Unary ! expects bool")),
+                };
+                Ok(TypedValue {
+                    value: Value::Bool(!v),
+                    tag: Some(TypeTag::Primitive(PrimitiveType::Bool)),
+                    is_literal: false,
+                })
+            }
             Borrow => Err(RuntimeError::new(
                 "borrow operator not supported in runtime yet",
             )),
-        }
-    }
-
-    fn add_values(&self, left: Value, right: Value) -> RuntimeResult<Value> {
-        match (left, right) {
-            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
-            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
-            (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 + b)),
-            (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + b as f64)),
-            (a, b) => Ok(Value::String(format!(
-                "{}{}",
-                a.to_string_value(),
-                b.to_string_value()
-            ))),
-        }
-    }
-
-    fn as_number(&self, value: Value) -> RuntimeResult<f64> {
-        match value {
-            Value::Int(i) => Ok(i as f64),
-            Value::Float(f) => Ok(f),
-            other => Err(RuntimeError::new(format!(
-                "Expected number but got {other:?}"
-            ))),
         }
     }
 
@@ -2525,6 +4190,7 @@ impl Interpreter {
             (Value::Null, Value::Null) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Char(a), Value::Char(b)) => a == b,
             (Value::Int(a), Value::Float(b)) => (*a as f64 - *b).abs() < f64::EPSILON,
             (Value::Float(a), Value::Int(b)) => (*a - *b as f64).abs() < f64::EPSILON,
             (Value::Float(a), Value::Float(b)) => (a - b).abs() < f64::EPSILON,
@@ -2569,13 +4235,10 @@ impl Interpreter {
             (Value::Set(a), Value::Set(b)) => {
                 let a_ref = a.borrow();
                 let b_ref = b.borrow();
-                if a_ref.len() != b_ref.len() {
+                if a_ref.items.len() != b_ref.items.len() {
                     return false;
                 }
-                a_ref
-                    .iter()
-                    .zip(b_ref.iter())
-                    .all(|(x, y)| self.values_equal(x, y))
+                a_ref.items.iter().all(|k| b_ref.items.contains(k))
             }
             (Value::Result(a), Value::Result(b)) => match (a, b) {
                 (ResultValue::Ok { value: x, .. }, ResultValue::Ok { value: y, .. }) => {
@@ -2607,6 +4270,17 @@ impl Interpreter {
                     return false;
                 }
                 a.iter().zip(b.iter()).all(|(x, y)| self.values_equal(x, y))
+            }
+            (Value::Array(a), Value::Array(b)) => {
+                let a_ref = a.borrow();
+                let b_ref = b.borrow();
+                if a_ref.len() != b_ref.len() {
+                    return false;
+                }
+                a_ref
+                    .iter()
+                    .zip(b_ref.iter())
+                    .all(|(x, y)| self.values_equal(x, y))
             }
             (Value::Closure(_), Value::Closure(_)) => false, // Closures are never equal
             _ => false,
@@ -2657,6 +4331,36 @@ impl Interpreter {
                     ));
                 }
                 binding.call(self, &args)
+            }
+            Value::EnumConstructor(enum_name, variant_name) => {
+                let type_params = type_args.unwrap_or_default();
+                let schema = self
+                    .enum_defs
+                    .get(&enum_name)
+                    .ok_or_else(|| RuntimeError::new(format!("Unknown enum `{enum_name}`")))?;
+                let expected = schema.variants.get(&variant_name).ok_or_else(|| {
+                    RuntimeError::new(format!("Unknown variant `{variant_name}`"))
+                })?;
+                if expected.len() != args.len() {
+                    return Err(RuntimeError::new(format!(
+                        "Enum constructor `{enum_name}::{variant_name}` expects {} arguments, got {}",
+                        expected.len(),
+                        args.len()
+                    )));
+                }
+                let mut coerced = Vec::new();
+                for (value, tag) in args.into_iter().zip(expected.iter()) {
+                    ensure_tag_match(&Some(tag.clone()), &value, "enum constructor")?;
+                    let mut v = value;
+                    apply_type_tag_to_value(&mut v, tag);
+                    coerced.push(v);
+                }
+                Ok(Value::Enum(EnumInstance {
+                    name: Some(enum_name),
+                    variant: variant_name,
+                    payload: coerced,
+                    type_params,
+                }))
             }
             other => Err(RuntimeError::new(format!(
                 "Attempted to call non-callable value: {other:?}"
@@ -2713,18 +4417,31 @@ impl Interpreter {
                 );
             }
             let tag = type_tag_from_type_expr_with_bindings(&param.ty, &type_bindings);
+            ensure_tag_match(&Some(tag.clone()), &value, "function argument")?;
             apply_type_tag_to_value(&mut value, &tag);
             frame.define(param.name.clone(), value);
         }
         self.type_bindings.push(type_bindings.clone());
-        let block_result = self.execute_block(&func.body, frame);
+        self.return_type_stack.push(
+            func.return_type
+                .as_ref()
+                .map(|ret_ty| type_tag_from_type_expr_with_bindings(ret_ty, &type_bindings)),
+        );
+        let block_result = self.execute_block(&func.body, frame, 0);
         self.type_bindings.pop();
+        self.return_type_stack.pop();
         let mut result = match block_result? {
             ExecSignal::Return(value) => value,
             ExecSignal::None => Value::Null,
+            _ => {
+                return Err(RuntimeError::new(
+                    "Control flow signal can't escape function",
+                ))
+            }
         };
         if let Some(ret_ty) = &func.return_type {
             let return_tag = type_tag_from_type_expr_with_bindings(ret_ty, &type_bindings);
+            ensure_tag_match(&Some(return_tag.clone()), &result, "return value")?;
             apply_type_tag_to_value(&mut result, &return_tag);
         }
         Ok(result)
@@ -2749,10 +4466,30 @@ impl Interpreter {
         for (param, value) in closure.params.iter().zip(args.into_iter()) {
             frame.define(param.clone(), value);
         }
-        match self.execute_block(&closure.body, frame)? {
+        match self.execute_block(&closure.body, frame, 0)? {
             ExecSignal::Return(value) => Ok(value),
             ExecSignal::None => Ok(Value::Null),
+            _ => Err(RuntimeError::new(
+                "Control flow signal can't escape closure",
+            )),
         }
+    }
+}
+
+fn stmt_span(stmt: &Stmt) -> Span {
+    match stmt {
+        Stmt::VarDecl(decl) => decl.span,
+        Stmt::Expr(expr) => expr.span(),
+        Stmt::Return { span, .. } => *span,
+        Stmt::If(stmt) => stmt.span,
+        Stmt::While { span, .. } => *span,
+        Stmt::For { span, .. } => *span,
+        Stmt::Switch(stmt) => stmt.span,
+        Stmt::Try(stmt) => stmt.span,
+        Stmt::Block(block) => block.span,
+        Stmt::Unsafe { span, .. } => *span,
+        Stmt::Assembly(block) => block.span,
+        Stmt::Break(span) | Stmt::Continue(span) => *span,
     }
 }
 
@@ -2765,12 +4502,32 @@ fn register_builtins(env: &Env) {
             map
         },
     });
+    let print_fn = Value::Builtin(builtin_print);
     let panic_fn = Value::Builtin(builtin_panic);
     let math_module = Value::Module(ModuleValue {
         name: "math".to_string(),
         fields: {
             let mut map = HashMap::new();
             map.insert("sqrt".to_string(), Value::Builtin(builtin_math_sqrt));
+            map.insert("pow".to_string(), Value::Builtin(builtin_math_pow));
+            map.insert("abs".to_string(), Value::Builtin(builtin_math_abs));
+            map.insert("floor".to_string(), Value::Builtin(builtin_math_floor));
+            map.insert("ceil".to_string(), Value::Builtin(builtin_math_ceil));
+            map.insert("round".to_string(), Value::Builtin(builtin_math_round));
+            map.insert("sin".to_string(), Value::Builtin(builtin_math_sin));
+            map.insert("cos".to_string(), Value::Builtin(builtin_math_cos));
+            map.insert("tan".to_string(), Value::Builtin(builtin_math_tan));
+            map.insert("asin".to_string(), Value::Builtin(builtin_math_asin));
+            map.insert("acos".to_string(), Value::Builtin(builtin_math_acos));
+            map.insert("atan".to_string(), Value::Builtin(builtin_math_atan));
+            map.insert("atan2".to_string(), Value::Builtin(builtin_math_atan2));
+            map.insert("exp".to_string(), Value::Builtin(builtin_math_exp));
+            map.insert("ln".to_string(), Value::Builtin(builtin_math_ln));
+            map.insert("log10".to_string(), Value::Builtin(builtin_math_log10));
+            map.insert("log2".to_string(), Value::Builtin(builtin_math_log2));
+            map.insert("min".to_string(), Value::Builtin(builtin_math_min));
+            map.insert("max".to_string(), Value::Builtin(builtin_math_max));
+            map.insert("clamp".to_string(), Value::Builtin(builtin_math_clamp));
             map.insert("pi".to_string(), Value::Builtin(builtin_math_pi));
             map
         },
@@ -2783,6 +4540,8 @@ fn register_builtins(env: &Env) {
             map.insert("push".to_string(), Value::Builtin(builtin_vec_push));
             map.insert("pop".to_string(), Value::Builtin(builtin_vec_pop));
             map.insert("len".to_string(), Value::Builtin(builtin_vec_len));
+            map.insert("get".to_string(), Value::Builtin(builtin_vec_get));
+            map.insert("set".to_string(), Value::Builtin(builtin_vec_set));
             map.insert("sort".to_string(), Value::Builtin(builtin_vec_sort));
             map.insert("reverse".to_string(), Value::Builtin(builtin_vec_reverse));
             map.insert("insert".to_string(), Value::Builtin(builtin_vec_insert));
@@ -2811,6 +4570,9 @@ fn register_builtins(env: &Env) {
                 "ends_with".to_string(),
                 Value::Builtin(builtin_str_ends_with),
             );
+            map.insert("to_i32".to_string(), Value::Builtin(builtin_str_to_i32));
+            map.insert("to_i64".to_string(), Value::Builtin(builtin_str_to_i64));
+            map.insert("to_f64".to_string(), Value::Builtin(builtin_str_to_f64));
             map
         },
     });
@@ -2870,8 +4632,13 @@ fn register_builtins(env: &Env) {
             map.insert("put".to_string(), Value::Builtin(builtin_map_put));
             map.insert("get".to_string(), Value::Builtin(builtin_map_get));
             map.insert("remove".to_string(), Value::Builtin(builtin_map_remove));
+            map.insert(
+                "contains_key".to_string(),
+                Value::Builtin(builtin_map_contains),
+            );
             map.insert("keys".to_string(), Value::Builtin(builtin_map_keys));
             map.insert("values".to_string(), Value::Builtin(builtin_map_values));
+            map.insert("items".to_string(), Value::Builtin(builtin_map_items));
             map.insert("len".to_string(), Value::Builtin(builtin_map_len));
             map
         },
@@ -2885,6 +4652,16 @@ fn register_builtins(env: &Env) {
             map.insert("remove".to_string(), Value::Builtin(builtin_set_remove));
             map.insert("contains".to_string(), Value::Builtin(builtin_set_contains));
             map.insert("len".to_string(), Value::Builtin(builtin_set_len));
+            map.insert("to_vec".to_string(), Value::Builtin(builtin_set_to_vec));
+            map.insert("union".to_string(), Value::Builtin(builtin_set_union));
+            map.insert(
+                "intersection".to_string(),
+                Value::Builtin(builtin_set_intersection),
+            );
+            map.insert(
+                "difference".to_string(),
+                Value::Builtin(builtin_set_difference),
+            );
             map
         },
     });
@@ -2955,6 +4732,7 @@ fn register_builtins(env: &Env) {
     });
 
     env.define("log", log_module.clone());
+    env.define("print", print_fn.clone());
     env.define("panic", panic_fn.clone());
     env.define("math", math_module.clone());
     env.define("vec", vec_module.clone());
@@ -2987,6 +4765,7 @@ fn register_builtins(env: &Env) {
     forge_fields.insert("fs".to_string(), fs_module());
     forge_fields.insert("net".to_string(), net_module());
     forge_fields.insert("db".to_string(), forge::db::forge_db_module());
+    forge_fields.insert("error".to_string(), error_module());
 
     env.define(
         "forge",
@@ -3007,12 +4786,66 @@ fn builtin_log_info(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<
     Ok(Value::Null)
 }
 
+fn builtin_print(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    let line = args
+        .iter()
+        .map(|v| v.to_string_value())
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!("{line}");
+    Ok(Value::Null)
+}
+
 fn builtin_panic(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     let message = args
         .get(0)
         .map(|v| v.to_string_value())
         .unwrap_or_else(|| "panic!".to_string());
     Err(RuntimeError::new(format!("panic: {message}")))
+}
+
+fn error_module() -> Value {
+    fn builtin_error_new(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "error.new")?;
+        let code = expect_string(&args[0])?;
+        let msg = expect_string(&args[1])?;
+        Ok(Value::String(format!("[{code}] {msg}")))
+    }
+
+    fn builtin_error_wrap(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "error.wrap")?;
+        let err = expect_string(&args[0])?;
+        let ctx = expect_string(&args[1])?;
+        Ok(Value::String(format!("{ctx}: {err}")))
+    }
+
+    fn builtin_error_throw(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 1, "error.throw")?;
+        let msg = expect_string(&args[0])?;
+        Err(RuntimeError::propagate(Value::String(msg)))
+    }
+
+    fn builtin_error_fail(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+        ensure_arity(args, 2, "error.fail")?;
+        let code = expect_string(&args[0])?;
+        let msg = expect_string(&args[1])?;
+        let formatted = format!("[{code}] {msg}");
+        Ok(result_err_value(
+            Value::String(formatted),
+            simple_unit_tag(),
+            Some(TypeTag::Primitive(PrimitiveType::String)),
+        ))
+    }
+
+    let mut fields = HashMap::new();
+    fields.insert("new".to_string(), Value::Builtin(builtin_error_new));
+    fields.insert("wrap".to_string(), Value::Builtin(builtin_error_wrap));
+    fields.insert("throw".to_string(), Value::Builtin(builtin_error_throw));
+    fields.insert("fail".to_string(), Value::Builtin(builtin_error_fail));
+    Value::Module(ModuleValue {
+        name: "error".to_string(),
+        fields,
+    })
 }
 
 // ---------------------------
@@ -3093,11 +4926,11 @@ fn fs_module() -> Value {
     fn fs_read_bytes(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
         ensure_arity(args, 1, "fs.read_bytes")?;
         let path = expect_string(&args[0])?;
-        let elem_tag = TypeTag::Primitive(PrimitiveType::UInt);
+        let elem_tag = TypeTag::Primitive(PrimitiveType::Int(IntType::U8));
         let ok_tag = Some(TypeTag::Vec(Box::new(elem_tag.clone())));
         match std::fs::read(&path) {
             Ok(bytes) => {
-                let vec_vals = bytes.into_iter().map(|b| Value::Int(b as i64)).collect();
+                let vec_vals = bytes.into_iter().map(|b| Value::Int(b as i128)).collect();
                 wrap_ok(make_vec_value(vec_vals, Some(elem_tag)), ok_tag)
             }
             Err(e) => io_err_to_result(e, ok_tag),
@@ -3121,7 +4954,7 @@ fn fs_module() -> Value {
         let data: Result<Vec<u8>, _> = vec_rc
             .borrow()
             .iter()
-            .map(|v| expect_int(v).map(|i| i as u8))
+            .map(|v| expect_int(v).and_then(|i| int_to_u8(i, "byte")))
             .collect();
         let data = data.map_err(|e| RuntimeError::new(e.to_string()))?;
         match std::fs::write(&path, data) {
@@ -3152,7 +4985,7 @@ fn fs_module() -> Value {
         let data: Result<Vec<u8>, _> = vec_rc
             .borrow()
             .iter()
-            .map(|v| expect_int(v).map(|i| i as u8))
+            .map(|v| expect_int(v).and_then(|i| int_to_u8(i, "byte")))
             .collect();
         let data = data.map_err(|e| RuntimeError::new(e.to_string()))?;
         match std::fs::OpenOptions::new()
@@ -3725,7 +5558,7 @@ fn fs_module() -> Value {
         let mut fields = HashMap::new();
         fields.insert("is_file".to_string(), Value::Bool(meta.is_file()));
         fields.insert("is_dir".to_string(), Value::Bool(meta.is_dir()));
-        fields.insert("size".to_string(), Value::Int(meta.len() as i64));
+        fields.insert("size".to_string(), Value::Int(meta.len() as i128));
         #[cfg(unix)]
         let readonly = meta.permissions().readonly();
         #[cfg(not(unix))]
@@ -3736,13 +5569,15 @@ fn fs_module() -> Value {
             if let Some(t) = system_time {
                 match t.duration_since(std::time::UNIX_EPOCH) {
                     Ok(d) => option_some_value(
-                        Value::Int(d.as_millis() as i64),
-                        Some(TypeTag::Primitive(PrimitiveType::Int)),
+                        Value::Int(d.as_millis() as i128),
+                        Some(TypeTag::Primitive(PrimitiveType::Int(IntType::I64))),
                     ),
-                    Err(_) => option_none_value(Some(TypeTag::Primitive(PrimitiveType::Int))),
+                    Err(_) => option_none_value(Some(TypeTag::Primitive(PrimitiveType::Int(
+                        IntType::I64,
+                    )))),
                 }
             } else {
-                option_none_value(Some(TypeTag::Primitive(PrimitiveType::Int)))
+                option_none_value(Some(TypeTag::Primitive(PrimitiveType::Int(IntType::I64))))
             }
         }
 
@@ -3868,7 +5703,7 @@ fn net_module() -> Value {
 
     fn socket_struct(id: i64) -> Value {
         let mut fields = HashMap::new();
-        fields.insert("id".to_string(), Value::Int(id));
+        fields.insert("id".to_string(), Value::Int(id.into()));
         Value::Struct(StructInstance {
             name: Some("net::Socket".to_string()),
             type_params: Vec::new(),
@@ -3877,7 +5712,7 @@ fn net_module() -> Value {
     }
     fn listener_struct(id: i64) -> Value {
         let mut fields = HashMap::new();
-        fields.insert("id".to_string(), Value::Int(id));
+        fields.insert("id".to_string(), Value::Int(id.into()));
         Value::Struct(StructInstance {
             name: Some("net::Listener".to_string()),
             type_params: Vec::new(),
@@ -3886,7 +5721,7 @@ fn net_module() -> Value {
     }
     fn udp_struct(id: i64) -> Value {
         let mut fields = HashMap::new();
-        fields.insert("id".to_string(), Value::Int(id));
+        fields.insert("id".to_string(), Value::Int(id.into()));
         Value::Struct(StructInstance {
             name: Some("net::UdpSocket".to_string()),
             type_params: Vec::new(),
@@ -3981,7 +5816,7 @@ fn net_module() -> Value {
         let data: Result<Vec<u8>, _> = vec_rc
             .borrow()
             .iter()
-            .map(|v| expect_int(v).map(|i| i as u8))
+            .map(|v| expect_int(v).and_then(|i| int_to_u8(i, "byte")))
             .collect();
         let data = data.map_err(|e| RuntimeError::new(e.to_string()))?;
         let mut sockets = sockets().lock().unwrap();
@@ -3997,7 +5832,7 @@ fn net_module() -> Value {
     fn net_tcp_recv(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
         ensure_arity(args, 2, "net.tcp_recv")?;
         let id = expect_handle(&args[0], "net::Socket")?;
-        let len = expect_int(&args[1])? as usize;
+        let len = int_to_usize(expect_int(&args[1])?, "receive length")?;
         let mut buf = vec![0u8; len];
         let mut sockets = sockets().lock().unwrap();
         let sock = sockets
@@ -4008,18 +5843,18 @@ fn net_module() -> Value {
                 buf.truncate(read);
                 wrap_ok(
                     make_vec_value(
-                        buf.into_iter().map(|b| Value::Int(b as i64)).collect(),
-                        Some(TypeTag::Primitive(PrimitiveType::UInt)),
+                        buf.into_iter().map(|b| Value::Int(b as i128)).collect(),
+                        Some(TypeTag::Primitive(PrimitiveType::Int(IntType::U8))),
                     ),
                     Some(TypeTag::Vec(Box::new(TypeTag::Primitive(
-                        PrimitiveType::UInt,
+                        PrimitiveType::Int(IntType::U8),
                     )))),
                 )
             }
             Err(e) => wrap_err(
                 e.to_string(),
                 Some(TypeTag::Vec(Box::new(TypeTag::Primitive(
-                    PrimitiveType::UInt,
+                    PrimitiveType::Int(IntType::U8),
                 )))),
             ),
         }
@@ -4072,7 +5907,7 @@ fn net_module() -> Value {
         let data: Result<Vec<u8>, _> = vec_rc
             .borrow()
             .iter()
-            .map(|v| expect_int(v).map(|i| i as u8))
+            .map(|v| expect_int(v).and_then(|i| int_to_u8(i, "byte")))
             .collect();
         let data = data.map_err(|e| RuntimeError::new(e.to_string()))?;
         let mut udps = udps().lock().unwrap();
@@ -4081,17 +5916,20 @@ fn net_module() -> Value {
             .ok_or_else(|| RuntimeError::new("invalid udp handle"))?;
         match sock.send_to(&data, &addr) {
             Ok(sent) => wrap_ok(
-                Value::Int(sent as i64),
-                Some(TypeTag::Primitive(PrimitiveType::Int)),
+                Value::Int(sent as i128),
+                Some(TypeTag::Primitive(PrimitiveType::Int(IntType::I64))),
             ),
-            Err(e) => wrap_err(e.to_string(), Some(TypeTag::Primitive(PrimitiveType::Int))),
+            Err(e) => wrap_err(
+                e.to_string(),
+                Some(TypeTag::Primitive(PrimitiveType::Int(IntType::I64))),
+            ),
         }
     }
 
     fn net_udp_recv_from(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
         ensure_arity(args, 2, "net.udp_recv_from")?;
         let id = expect_handle(&args[0], "net::UdpSocket")?;
-        let len = expect_int(&args[1])? as usize;
+        let len = int_to_usize(expect_int(&args[1])?, "receive length")?;
         let mut buf = vec![0u8; len];
         let mut udps = udps().lock().unwrap();
         let sock = udps
@@ -4101,8 +5939,8 @@ fn net_module() -> Value {
             Ok((read, from)) => {
                 buf.truncate(read);
                 let data_val = make_vec_value(
-                    buf.into_iter().map(|b| Value::Int(b as i64)).collect(),
-                    Some(TypeTag::Primitive(PrimitiveType::UInt)),
+                    buf.into_iter().map(|b| Value::Int(b as i128)).collect(),
+                    Some(TypeTag::Primitive(PrimitiveType::Int(IntType::U8))),
                 );
                 let mut fields = HashMap::new();
                 fields.insert("data".to_string(), data_val);
@@ -4277,7 +6115,7 @@ fn net_module() -> Value {
         let data: Result<Vec<u8>, _> = vec_rc
             .borrow()
             .iter()
-            .map(|v| expect_int(v).map(|i| i as u8))
+            .map(|v| expect_int(v).and_then(|i| int_to_u8(i, "byte")))
             .collect();
         let data = data.map_err(|e| RuntimeError::new(e.to_string()))?;
         let mut udps = udps().lock().unwrap();
@@ -4286,17 +6124,20 @@ fn net_module() -> Value {
             .ok_or_else(|| RuntimeError::new("invalid udp handle"))?;
         match sock.send(&data) {
             Ok(sent) => wrap_ok(
-                Value::Int(sent as i64),
-                Some(TypeTag::Primitive(PrimitiveType::Int)),
+                Value::Int(sent as i128),
+                Some(TypeTag::Primitive(PrimitiveType::Int(IntType::I64))),
             ),
-            Err(e) => wrap_err(e.to_string(), Some(TypeTag::Primitive(PrimitiveType::Int))),
+            Err(e) => wrap_err(
+                e.to_string(),
+                Some(TypeTag::Primitive(PrimitiveType::Int(IntType::I64))),
+            ),
         }
     }
 
     fn net_udp_recv(_i: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
         ensure_arity(args, 2, "net.udp_recv")?;
         let id = expect_handle(&args[0], "net::UdpSocket")?;
-        let len = expect_int(&args[1])? as usize;
+        let len = int_to_usize(expect_int(&args[1])?, "receive length")?;
         let mut buf = vec![0u8; len];
         let mut udps = udps().lock().unwrap();
         let sock = udps
@@ -4307,18 +6148,18 @@ fn net_module() -> Value {
                 buf.truncate(read);
                 wrap_ok(
                     make_vec_value(
-                        buf.into_iter().map(|b| Value::Int(b as i64)).collect(),
-                        Some(TypeTag::Primitive(PrimitiveType::UInt)),
+                        buf.into_iter().map(|b| Value::Int(b as i128)).collect(),
+                        Some(TypeTag::Primitive(PrimitiveType::Int(IntType::U8))),
                     ),
                     Some(TypeTag::Vec(Box::new(TypeTag::Primitive(
-                        PrimitiveType::UInt,
+                        PrimitiveType::Int(IntType::U8),
                     )))),
                 )
             }
             Err(e) => wrap_err(
                 e.to_string(),
                 Some(TypeTag::Vec(Box::new(TypeTag::Primitive(
-                    PrimitiveType::UInt,
+                    PrimitiveType::Int(IntType::U8),
                 )))),
             ),
         }
@@ -4475,20 +6316,263 @@ fn net_module() -> Value {
     })
 }
 
+#[derive(Clone, Copy)]
+enum Number {
+    Int(i128),
+    Float(f64),
+}
+
+impl Number {
+    fn as_f64(self) -> f64 {
+        match self {
+            Number::Int(i) => i as f64,
+            Number::Float(f) => f,
+        }
+    }
+
+    fn to_value(self) -> Value {
+        match self {
+            Number::Int(i) => Value::Int(i),
+            Number::Float(f) => Value::Float(f),
+        }
+    }
+}
+
+fn expect_number(value: &Value, name: &str) -> RuntimeResult<Number> {
+    match value {
+        Value::Int(i) => Ok(Number::Int(*i)),
+        Value::Float(f) => Ok(Number::Float(*f)),
+        _ => Err(RuntimeError::new(format!("{name} expects a number"))),
+    }
+}
+
+fn expect_same_numeric_kind(values: &[Value], name: &str) -> RuntimeResult<Vec<Number>> {
+    let mut out = Vec::new();
+    for v in values {
+        out.push(expect_number(v, name)?);
+    }
+    if out.iter().any(|n| matches!(n, Number::Int(_)))
+        && out.iter().any(|n| matches!(n, Number::Float(_)))
+    {
+        return Err(RuntimeError::new(format!(
+            "{name} expects all operands to be the same numeric type"
+        )));
+    }
+    Ok(out)
+}
+
+fn float_ok_tag() -> Option<TypeTag> {
+    Some(TypeTag::Primitive(PrimitiveType::Float(FloatType::F64)))
+}
+
+fn string_err_tag() -> Option<TypeTag> {
+    Some(TypeTag::Primitive(PrimitiveType::String))
+}
+
+fn math_domain_err(msg: &str) -> RuntimeResult<Value> {
+    Ok(result_err_value(
+        Value::String(msg.to_string()),
+        float_ok_tag(),
+        string_err_tag(),
+    ))
+}
+
+fn math_ok_float(value: f64) -> RuntimeResult<Value> {
+    Ok(Value::Float(value))
+}
+
+fn math_ok_float_result(value: f64) -> RuntimeResult<Value> {
+    Ok(result_ok_value(
+        Value::Float(value),
+        float_ok_tag(),
+        string_err_tag(),
+    ))
+}
+
 fn builtin_math_sqrt(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
-    let v = args
-        .get(0)
-        .ok_or_else(|| RuntimeError::new("sqrt requires one argument"))?;
-    let num = match v {
-        Value::Int(i) => *i as f64,
-        Value::Float(f) => *f,
-        _ => return Err(RuntimeError::new("sqrt expects number")),
-    };
-    Ok(Value::Float(num.sqrt()))
+    ensure_arity(args, 1, "math.sqrt")?;
+    let num = expect_number(&args[0], "math.sqrt")?.as_f64();
+    if num < 0.0 {
+        return math_domain_err("sqrt domain error: negative input");
+    }
+    math_ok_float_result(num.sqrt())
+}
+
+fn builtin_math_pow(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 2, "math.pow")?;
+    let base = expect_number(&args[0], "math.pow")?.as_f64();
+    let exp = expect_number(&args[1], "math.pow")?.as_f64();
+    math_ok_float(base.powf(exp))
+}
+
+fn builtin_math_abs(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "math.abs")?;
+    match expect_number(&args[0], "math.abs")? {
+        Number::Int(i) => Ok(Value::Int(i.saturating_abs())),
+        Number::Float(f) => Ok(Value::Float(f.abs())),
+    }
+}
+
+fn builtin_math_floor(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "math.floor")?;
+    match expect_number(&args[0], "math.floor")? {
+        Number::Int(i) => Ok(Value::Int(i)),
+        Number::Float(f) => Ok(Value::Float(f.floor())),
+    }
+}
+
+fn builtin_math_ceil(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "math.ceil")?;
+    match expect_number(&args[0], "math.ceil")? {
+        Number::Int(i) => Ok(Value::Int(i)),
+        Number::Float(f) => Ok(Value::Float(f.ceil())),
+    }
+}
+
+fn builtin_math_round(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "math.round")?;
+    match expect_number(&args[0], "math.round")? {
+        Number::Int(i) => Ok(Value::Int(i)),
+        Number::Float(f) => Ok(Value::Float(f.round())),
+    }
+}
+
+fn builtin_math_sin(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "math.sin")?;
+    let angle = expect_number(&args[0], "math.sin")?.as_f64();
+    Ok(Value::Float(angle.sin()))
+}
+
+fn builtin_math_cos(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "math.cos")?;
+    let angle = expect_number(&args[0], "math.cos")?.as_f64();
+    Ok(Value::Float(angle.cos()))
+}
+
+fn builtin_math_tan(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "math.tan")?;
+    let angle = expect_number(&args[0], "math.tan")?.as_f64();
+    Ok(Value::Float(angle.tan()))
+}
+
+fn builtin_math_asin(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "math.asin")?;
+    let v = expect_number(&args[0], "math.asin")?.as_f64();
+    if !(-1.0..=1.0).contains(&v) {
+        return math_domain_err("asin domain error: expected -1.0..=1.0");
+    }
+    math_ok_float_result(v.asin())
+}
+
+fn builtin_math_acos(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "math.acos")?;
+    let v = expect_number(&args[0], "math.acos")?.as_f64();
+    if !(-1.0..=1.0).contains(&v) {
+        return math_domain_err("acos domain error: expected -1.0..=1.0");
+    }
+    math_ok_float_result(v.acos())
+}
+
+fn builtin_math_atan(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "math.atan")?;
+    let v = expect_number(&args[0], "math.atan")?.as_f64();
+    Ok(Value::Float(v.atan()))
+}
+
+fn builtin_math_atan2(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 2, "math.atan2")?;
+    let y = expect_number(&args[0], "math.atan2")?.as_f64();
+    let x = expect_number(&args[1], "math.atan2")?.as_f64();
+    Ok(Value::Float(y.atan2(x)))
+}
+
+fn builtin_math_exp(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "math.exp")?;
+    let v = expect_number(&args[0], "math.exp")?.as_f64();
+    Ok(Value::Float(v.exp()))
+}
+
+fn builtin_math_ln(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "math.ln")?;
+    let v = expect_number(&args[0], "math.ln")?.as_f64();
+    if v <= 0.0 {
+        return math_domain_err("ln domain error: expected positive input");
+    }
+    math_ok_float_result(v.ln())
+}
+
+fn builtin_math_log10(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "math.log10")?;
+    let v = expect_number(&args[0], "math.log10")?.as_f64();
+    if v <= 0.0 {
+        return math_domain_err("log10 domain error: expected positive input");
+    }
+    math_ok_float_result(v.log10())
+}
+
+fn builtin_math_log2(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "math.log2")?;
+    let v = expect_number(&args[0], "math.log2")?.as_f64();
+    if v <= 0.0 {
+        return math_domain_err("log2 domain error: expected positive input");
+    }
+    math_ok_float_result(v.log2())
+}
+
+fn builtin_math_min(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 2, "math.min")?;
+    let nums = expect_same_numeric_kind(&args[0..2], "math.min")?;
+    match (nums[0], nums[1]) {
+        (Number::Int(a), Number::Int(b)) => Ok(Value::Int(a.min(b))),
+        (Number::Float(a), Number::Float(b)) => Ok(Value::Float(a.min(b))),
+        _ => unreachable!(),
+    }
+}
+
+fn builtin_math_max(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 2, "math.max")?;
+    let nums = expect_same_numeric_kind(&args[0..2], "math.max")?;
+    match (nums[0], nums[1]) {
+        (Number::Int(a), Number::Int(b)) => Ok(Value::Int(a.max(b))),
+        (Number::Float(a), Number::Float(b)) => Ok(Value::Float(a.max(b))),
+        _ => unreachable!(),
+    }
+}
+
+fn builtin_math_clamp(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 3, "math.clamp")?;
+    let nums = expect_same_numeric_kind(&args[0..3], "math.clamp")?;
+    match (nums[0], nums[1], nums[2]) {
+        (Number::Int(x), Number::Int(min), Number::Int(max)) => Ok(Value::Int(x.clamp(min, max))),
+        (Number::Float(x), Number::Float(min), Number::Float(max)) => {
+            Ok(Value::Float(x.clamp(min, max)))
+        }
+        _ => unreachable!(),
+    }
 }
 
 fn builtin_math_pi(_interp: &mut Interpreter, _args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Float(std::f64::consts::PI))
+}
+
+fn simple_unit_tag() -> Option<TypeTag> {
+    Some(TypeTag::Tuple(Vec::new()))
+}
+
+fn simple_err(msg: String) -> RuntimeResult<Value> {
+    Ok(result_err_value(
+        Value::String(msg),
+        simple_unit_tag(),
+        Some(TypeTag::Primitive(PrimitiveType::String)),
+    ))
+}
+
+fn simple_ok(value: Value) -> RuntimeResult<Value> {
+    Ok(result_ok_value(
+        value,
+        simple_unit_tag(),
+        Some(TypeTag::Primitive(PrimitiveType::String)),
+    ))
 }
 
 fn builtin_vec_new(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
@@ -4506,16 +6590,22 @@ fn builtin_vec_push(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<
         if let Some(tag) = &vec_mut.elem_type {
             apply_type_tag_to_value(&mut value, tag);
         }
+        if vec_mut.elem_type.is_none() {
+            vec_mut.elem_type = Some(value_type_tag(&value));
+        }
         vec_mut.push(value);
     }
-    Ok(Value::Null)
+    simple_ok(Value::Null)
 }
 
 fn builtin_vec_pop(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 1, "vec.pop")?;
     let vec_rc = expect_vec(&args[0])?;
-    let result = vec_rc.borrow_mut().pop().unwrap_or(Value::Null);
-    Ok(result)
+    let result = vec_rc.borrow_mut().pop();
+    Ok(match result {
+        Some(value) => option_some_value(value, vec_rc.borrow().elem_type.clone()),
+        None => option_none_value(vec_rc.borrow().elem_type.clone()),
+    })
 }
 
 fn builtin_vec_len(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
@@ -4523,15 +6613,56 @@ fn builtin_vec_len(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<V
     let vec_rc = expect_vec(&args[0])?;
     let len = {
         let vec_ref = vec_rc.borrow();
-        vec_ref.len() as i64
+        vec_ref.len() as i128
     };
     Ok(Value::Int(len))
+}
+
+fn builtin_vec_get(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 2, "vec.get")?;
+    let vec_rc = expect_vec(&args[0])?;
+    let idx_raw = expect_int(&args[1])?;
+    if idx_raw < 0 {
+        return Ok(option_none_value(vec_rc.borrow().elem_type.clone()));
+    }
+    let idx = int_to_usize(idx_raw, "index")?;
+    let vec_ref = vec_rc.borrow();
+    let value = vec_ref.get(idx).cloned();
+    Ok(match value {
+        Some(v) => option_some_value(v, vec_ref.elem_type.clone()),
+        None => option_none_value(vec_ref.elem_type.clone()),
+    })
+}
+
+fn builtin_vec_set(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 3, "vec.set")?;
+    let vec_rc = expect_vec(&args[0])?;
+    let idx_raw = expect_int(&args[1])?;
+    if idx_raw < 0 {
+        return simple_err("vec.set: index must be non-negative".to_string());
+    }
+    let idx = int_to_usize(idx_raw, "index")?;
+    let mut value = args[2].clone();
+    let mut vec_mut = vec_rc.borrow_mut();
+    if idx >= vec_mut.len() {
+        return simple_err(format!(
+            "vec.set: index out of bounds: idx={} len={}",
+            idx,
+            vec_mut.len()
+        ));
+    }
+    ensure_tag_match(&vec_mut.elem_type, &value, "vec.set")?;
+    if let Some(tag) = &vec_mut.elem_type {
+        apply_type_tag_to_value(&mut value, tag);
+    }
+    vec_mut[idx] = value;
+    simple_ok(Value::Null)
 }
 
 fn builtin_str_len(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 1, "str.len")?;
     let s = expect_string(&args[0])?;
-    Ok(Value::Int(s.chars().count() as i64))
+    Ok(Value::Int(s.chars().count() as i128))
 }
 
 fn builtin_str_to_upper(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
@@ -4544,6 +6675,58 @@ fn builtin_str_to_lower(_interp: &mut Interpreter, args: &[Value]) -> RuntimeRes
     ensure_arity(args, 1, "str.to_lower")?;
     let s = expect_string(&args[0])?;
     Ok(Value::String(s.to_lowercase()))
+}
+
+fn str_parse_int(s: &str, target: IntType) -> RuntimeResult<Value> {
+    let parse_result = match target {
+        IntType::I8 => s.parse::<i8>().map(|v| v as i128),
+        IntType::I16 => s.parse::<i16>().map(|v| v as i128),
+        IntType::I32 => s.parse::<i32>().map(|v| v as i128),
+        IntType::I64 => s.parse::<i64>().map(|v| v as i128),
+        IntType::I128 => s.parse::<i128>(),
+        IntType::U8 => s.parse::<u8>().map(|v| v as i128),
+        IntType::U16 => s.parse::<u16>().map(|v| v as i128),
+        IntType::U32 => s.parse::<u32>().map(|v| v as i128),
+        IntType::U64 => s.parse::<u64>().map(|v| v as i128),
+        IntType::U128 => s.parse::<u128>().map(|v| v as i128),
+    };
+    let ok_tag = Some(TypeTag::Primitive(PrimitiveType::Int(target)));
+    let err_tag = Some(TypeTag::Primitive(PrimitiveType::String));
+    match parse_result {
+        Ok(v) => Ok(result_ok_value(Value::Int(v), ok_tag, err_tag)),
+        Err(e) => Ok(result_err_value(
+            Value::String(e.to_string()),
+            ok_tag,
+            err_tag,
+        )),
+    }
+}
+
+fn builtin_str_to_i32(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "str.to_i32")?;
+    let s = expect_string(&args[0])?;
+    str_parse_int(&s, IntType::I32)
+}
+
+fn builtin_str_to_i64(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "str.to_i64")?;
+    let s = expect_string(&args[0])?;
+    str_parse_int(&s, IntType::I64)
+}
+
+fn builtin_str_to_f64(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "str.to_f64")?;
+    let s = expect_string(&args[0])?;
+    let ok_tag = Some(TypeTag::Primitive(PrimitiveType::Float(FloatType::F64)));
+    let err_tag = Some(TypeTag::Primitive(PrimitiveType::String));
+    match s.parse::<f64>() {
+        Ok(v) => Ok(result_ok_value(Value::Float(v), ok_tag, err_tag)),
+        Err(e) => Ok(result_err_value(
+            Value::String(e.to_string()),
+            ok_tag,
+            err_tag,
+        )),
+    }
 }
 
 fn builtin_str_trim(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
@@ -4580,11 +6763,11 @@ fn builtin_str_find(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<
     let needle = expect_string(&args[1])?;
     match s.find(&needle) {
         Some(idx) => Ok(option_some_value(
-            Value::Int(idx as i64),
-            Some(TypeTag::Primitive(PrimitiveType::Int)),
+            Value::Int(idx as i128),
+            Some(TypeTag::Primitive(PrimitiveType::Int(IntType::I64))),
         )),
         None => Ok(option_none_value(Some(TypeTag::Primitive(
-            PrimitiveType::Int,
+            PrimitiveType::Int(IntType::I64),
         )))),
     }
 }
@@ -4761,50 +6944,74 @@ fn builtin_vec_sort(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<
     ensure_arity(args, 1, "vec.sort")?;
     let vec_rc = expect_vec(&args[0])?;
     let mut vec_mut = vec_rc.borrow_mut();
+    let mut unsupported = false;
     vec_mut.sort_by(|a, b| match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.cmp(y),
-        (Value::Float(x), Value::Float(y)) => {
-            if x < y {
-                std::cmp::Ordering::Less
-            } else if x > y {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        }
+        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
         (Value::String(x), Value::String(y)) => x.cmp(y),
-        _ => std::cmp::Ordering::Equal,
+        _ => {
+            unsupported = true;
+            std::cmp::Ordering::Equal
+        }
     });
-    Ok(Value::Null)
+    if unsupported {
+        return simple_err("vec.sort supports only numbers or strings".to_string());
+    }
+    simple_ok(Value::Null)
 }
 
 fn builtin_vec_reverse(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 1, "vec.reverse")?;
     let vec_rc = expect_vec(&args[0])?;
     vec_rc.borrow_mut().reverse();
-    Ok(Value::Null)
+    simple_ok(Value::Null)
 }
 
 fn builtin_vec_insert(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 3, "vec.insert")?;
     let vec_rc = expect_vec(&args[0])?;
-    let idx = expect_int(&args[1])? as usize;
+    let idx_raw = expect_int(&args[1])?;
+    if idx_raw < 0 {
+        return simple_err("vec.insert: index must be non-negative".to_string());
+    }
+    let idx = int_to_usize(idx_raw, "index")?;
     let mut value = args[2].clone();
     let mut vec_mut = vec_rc.borrow_mut();
     ensure_tag_match(&vec_mut.elem_type, &value, "vec.insert")?;
     if let Some(tag) = &vec_mut.elem_type {
         apply_type_tag_to_value(&mut value, tag);
+    } else {
+        vec_mut.elem_type = Some(value_type_tag(&value));
+    }
+    if idx > vec_mut.len() {
+        return simple_err(format!(
+            "vec.insert: index out of bounds: idx={} len={}",
+            idx,
+            vec_mut.len()
+        ));
     }
     vec_mut.insert(idx, value);
-    Ok(Value::Null)
+    simple_ok(Value::Null)
 }
 
 fn builtin_vec_remove(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 2, "vec.remove")?;
     let vec_rc = expect_vec(&args[0])?;
-    let idx = expect_int(&args[1])? as usize;
-    let result = vec_rc.borrow_mut().remove(idx);
-    Ok(result)
+    let idx_raw = expect_int(&args[1])?;
+    if idx_raw < 0 {
+        return simple_err("vec.remove: index must be non-negative".to_string());
+    }
+    let idx = int_to_usize(idx_raw, "index")?;
+    let mut vec_mut = vec_rc.borrow_mut();
+    if idx >= vec_mut.len() {
+        return simple_err(format!(
+            "vec.remove: index out of bounds: idx={} len={}",
+            idx,
+            vec_mut.len()
+        ));
+    }
+    let removed = vec_mut.remove(idx);
+    simple_ok(removed)
 }
 
 fn builtin_vec_extend(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
@@ -4834,7 +7041,7 @@ fn builtin_vec_extend(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResul
         }
     }
     vec_mut.extend(other_items);
-    Ok(Value::Null)
+    simple_ok(Value::Null)
 }
 
 pub(crate) fn ensure_arity(args: &[Value], expected: usize, name: &str) -> RuntimeResult<()> {
@@ -4852,12 +7059,19 @@ pub(crate) fn make_vec_value(items: Vec<Value>, elem_type: Option<TypeTag>) -> V
     Value::Vec(Rc::new(RefCell::new(VecValue { elem_type, items })))
 }
 
-fn make_set_value(items: Vec<Value>, elem_type: Option<TypeTag>) -> Value {
-    Value::Set(Rc::new(RefCell::new(SetValue { elem_type, items })))
+pub(crate) fn make_array_value(items: Vec<Value>, elem_type: Option<TypeTag>) -> Value {
+    Value::Array(Rc::new(RefCell::new(ArrayValue { elem_type, items })))
+}
+
+fn make_set_value_from_keys(keys: HashSet<MapKey>, elem_type: Option<TypeTag>) -> Value {
+    Value::Set(Rc::new(RefCell::new(SetValue {
+        elem_type,
+        items: keys,
+    })))
 }
 
 pub(crate) fn make_map_value(
-    entries: HashMap<String, Value>,
+    entries: HashMap<MapKey, Value>,
     key_type: Option<TypeTag>,
     value_type: Option<TypeTag>,
 ) -> Value {
@@ -4920,6 +7134,12 @@ fn apply_type_tag_to_value(value: &mut Value, tag: &TypeTag) {
     match (value, tag) {
         (Value::Vec(vec_rc), TypeTag::Vec(inner)) => {
             vec_rc.borrow_mut().elem_type = Some((**inner).clone());
+        }
+        (Value::Array(arr_rc), TypeTag::Array(inner, _)) => {
+            arr_rc.borrow_mut().elem_type = Some((**inner).clone());
+        }
+        (Value::Array(arr_rc), TypeTag::Slice(inner)) => {
+            arr_rc.borrow_mut().elem_type = Some((**inner).clone());
         }
         (Value::Set(set_rc), TypeTag::Set(inner)) => {
             set_rc.borrow_mut().elem_type = Some((**inner).clone());
@@ -4986,18 +7206,47 @@ pub(crate) fn expect_string(value: &Value) -> RuntimeResult<String> {
     }
 }
 
-pub(crate) fn expect_int(value: &Value) -> RuntimeResult<i64> {
+fn expect_bool_value(value: Value, context: &str) -> RuntimeResult<bool> {
+    match value {
+        Value::Bool(b) => Ok(b),
+        other => Err(RuntimeError::new(format!(
+            "expected bool in {context}, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+pub(crate) fn expect_int(value: &Value) -> RuntimeResult<i128> {
     match value {
         Value::Int(i) => Ok(*i),
-        Value::Float(f) => Ok(*f as i64),
+        Value::Float(f) => Ok(*f as i128),
         _ => Err(RuntimeError::new("Expected integer")),
     }
+}
+
+fn int_to_usize(value: i128, context: &str) -> RuntimeResult<usize> {
+    if value < 0 {
+        return Err(RuntimeError::new(format!("{context} must be non-negative")));
+    }
+    usize::try_from(value).map_err(|_| RuntimeError::new(format!("{context} too large")))
+}
+
+fn int_to_u8(value: i128, context: &str) -> RuntimeResult<u8> {
+    if value < 0 {
+        return Err(RuntimeError::new(format!("{context} must be non-negative")));
+    }
+    u8::try_from(value).map_err(|_| RuntimeError::new(format!("{context} out of range")))
+}
+
+fn expect_i64(value: &Value) -> RuntimeResult<i64> {
+    let raw = expect_int(value)?;
+    i64::try_from(raw).map_err(|_| RuntimeError::new("Expected 64-bit integer"))
 }
 
 fn expect_handle(value: &Value, name: &str) -> RuntimeResult<i64> {
     if let Value::Struct(inst) = value {
         if let Some(idv) = inst.fields.get("id") {
-            return expect_int(idv);
+            return expect_i64(idv);
         }
     }
     Err(RuntimeError::new(format!("expected {} handle", name)))
@@ -5027,30 +7276,33 @@ fn builtin_map_new(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<V
 fn builtin_map_put(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 3, "map.put")?;
     let map_rc = expect_map(&args[0])?;
-    {
-        let map_ref = map_rc.borrow();
-        ensure_tag_match(&map_ref.key_type, &args[1], "map.put key")?;
-        ensure_tag_match(&map_ref.value_type, &args[2], "map.put value")?;
-    }
-    let key = expect_string(&args[1])?;
+    let mut map_mut = map_rc.borrow_mut();
+    let key_tag = map_mut
+        .key_type
+        .clone()
+        .unwrap_or_else(|| value_type_tag(&args[1]));
+    ensure_tag_match(&Some(key_tag.clone()), &args[1], "map.put key")?;
+    let value_tag = map_mut
+        .value_type
+        .clone()
+        .unwrap_or_else(|| value_type_tag(&args[2]));
+    ensure_tag_match(&Some(value_tag.clone()), &args[2], "map.put value")?;
+    map_mut.key_type.get_or_insert(key_tag.clone());
+    map_mut.value_type.get_or_insert(value_tag.clone());
+    let key = map_key_from_value(&args[1], "map.put")?;
     let mut value = args[2].clone();
-    if let Some(tag) = &map_rc.borrow().value_type {
-        apply_type_tag_to_value(&mut value, tag);
-    }
-    map_rc.borrow_mut().insert(key, value);
-    Ok(Value::Null)
+    apply_type_tag_to_value(&mut value, &value_tag);
+    map_mut.insert(key, value);
+    simple_ok(Value::Null)
 }
 
 fn builtin_map_get(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 2, "map.get")?;
     let map_rc = expect_map(&args[0])?;
-    {
-        let map_ref = map_rc.borrow();
-        ensure_tag_match(&map_ref.key_type, &args[1], "map.get key")?;
-    }
-    let key = expect_string(&args[1])?;
+    let key = map_key_from_value(&args[1], "map.get")?;
     let (value_type, result) = {
         let map_ref = map_rc.borrow();
+        ensure_tag_match(&map_ref.key_type, &args[1], "map.get key")?;
         (map_ref.value_type.clone(), map_ref.get(&key).cloned())
     };
     match result {
@@ -5062,11 +7314,7 @@ fn builtin_map_get(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<V
 fn builtin_map_remove(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 2, "map.remove")?;
     let map_rc = expect_map(&args[0])?;
-    {
-        let map_ref = map_rc.borrow();
-        ensure_tag_match(&map_ref.key_type, &args[1], "map.remove key")?;
-    }
-    let key = expect_string(&args[1])?;
+    let key = map_key_from_value(&args[1], "map.remove")?;
     let value_type = { map_rc.borrow().value_type.clone() };
     let removed = map_rc.borrow_mut().remove(&key);
     match removed {
@@ -5087,7 +7335,10 @@ fn builtin_map_keys(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<
     };
     let keys: Vec<Value> = {
         let map_ref = map_rc.borrow();
-        map_ref.keys().map(|k| Value::String(k.clone())).collect()
+        map_ref
+            .keys()
+            .map(|k| map_key_to_value(k, key_type.as_ref()))
+            .collect()
     };
     Ok(make_vec_value(keys, key_type))
 }
@@ -5108,9 +7359,43 @@ fn builtin_map_len(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<V
     let map_rc = expect_map(&args[0])?;
     let len = {
         let map_ref = map_rc.borrow();
-        map_ref.len() as i64
+        map_ref.len() as i128
     };
     Ok(Value::Int(len))
+}
+
+fn builtin_map_contains(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 2, "map.contains_key")?;
+    let map_rc = expect_map(&args[0])?;
+    let key = map_key_from_value(&args[1], "map.contains_key")?;
+    {
+        let map_ref = map_rc.borrow();
+        ensure_tag_match(&map_ref.key_type, &args[1], "map.contains_key key")?;
+        Ok(Value::Bool(map_ref.contains_key(&key)))
+    }
+}
+
+fn builtin_map_items(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "map.items")?;
+    let map_rc = expect_map(&args[0])?;
+    let (key_tag, val_tag, items_vec) = {
+        let map_ref = map_rc.borrow();
+        let key_tag = map_ref.key_type.clone();
+        let val_tag = map_ref.value_type.clone();
+        let mut entries = Vec::new();
+        for (k, v) in map_ref.iter() {
+            entries.push(Value::Tuple(vec![
+                map_key_to_value(k, key_tag.as_ref()),
+                v.clone(),
+            ]));
+        }
+        (key_tag, val_tag, entries)
+    };
+    let tuple_tag = Some(TypeTag::Tuple(vec![
+        key_tag.clone().unwrap_or(TypeTag::Unknown),
+        val_tag.clone().unwrap_or(TypeTag::Unknown),
+    ]));
+    Ok(make_vec_value(items_vec, tuple_tag))
 }
 
 fn expect_set(value: &Value) -> RuntimeResult<Rc<RefCell<SetValue>>> {
@@ -5123,57 +7408,42 @@ fn expect_set(value: &Value) -> RuntimeResult<Rc<RefCell<SetValue>>> {
 
 fn builtin_set_new(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 0, "set.new")?;
-    Ok(make_set_value(Vec::new(), None))
+    Ok(make_set_value_from_keys(HashSet::new(), None))
 }
 
 fn builtin_set_insert(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 2, "set.insert")?;
     let set_rc = expect_set(&args[0])?;
-    let mut value = args[1].clone();
     let mut set_mut = set_rc.borrow_mut();
-    ensure_tag_match(&set_mut.elem_type, &value, "set.insert")?;
-    if let Some(tag) = &set_mut.elem_type {
-        apply_type_tag_to_value(&mut value, tag);
-    }
-    set_mut.push(value);
-    // For now, just add to set (TODO: implement uniqueness check)
-    Ok(Value::Bool(true))
+    let elem_tag = set_mut
+        .elem_type
+        .clone()
+        .unwrap_or_else(|| value_type_tag(&args[1]));
+    ensure_tag_match(&Some(elem_tag.clone()), &args[1], "set.insert")?;
+    set_mut.elem_type.get_or_insert(elem_tag.clone());
+    let key = map_key_from_value(&args[1], "set.insert")?;
+    let inserted = set_mut.items.insert(key);
+    simple_ok(Value::Bool(inserted))
 }
 
 fn builtin_set_remove(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 2, "set.remove")?;
     let set_rc = expect_set(&args[0])?;
-    let value = &args[1];
-    {
-        let set_ref = set_rc.borrow();
-        ensure_tag_match(&set_ref.elem_type, value, "set.remove")?;
-    }
-    let mut set_mut = set_rc.borrow_mut();
-    for (idx, existing) in set_mut.iter().enumerate() {
-        // Simple equality check - would need proper comparison
-        if format!("{:?}", existing) == format!("{:?}", value) {
-            set_mut.remove(idx);
-            return Ok(Value::Bool(true));
-        }
-    }
-    Ok(Value::Bool(false))
+    let set_ref = set_rc.borrow();
+    ensure_tag_match(&set_ref.elem_type, &args[1], "set.remove")?;
+    let key = map_key_from_value(&args[1], "set.remove")?;
+    drop(set_ref);
+    let removed = set_rc.borrow_mut().items.remove(&key);
+    Ok(Value::Bool(removed))
 }
 
 fn builtin_set_contains(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     ensure_arity(args, 2, "set.contains")?;
     let set_rc = expect_set(&args[0])?;
-    let value = &args[1];
-    {
-        let set_ref = set_rc.borrow();
-        ensure_tag_match(&set_ref.elem_type, value, "set.contains")?;
-    }
     let set_ref = set_rc.borrow();
-    for existing in set_ref.iter() {
-        if format!("{:?}", existing) == format!("{:?}", value) {
-            return Ok(Value::Bool(true));
-        }
-    }
-    Ok(Value::Bool(false))
+    ensure_tag_match(&set_ref.elem_type, &args[1], "set.contains")?;
+    let key = map_key_from_value(&args[1], "set.contains")?;
+    Ok(Value::Bool(set_ref.items.contains(&key)))
 }
 
 fn builtin_set_len(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
@@ -5181,7 +7451,82 @@ fn builtin_set_len(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<V
     let set_rc = expect_set(&args[0])?;
     let len = {
         let set_ref = set_rc.borrow();
-        set_ref.len() as i64
+        set_ref.items.len() as i128
     };
     Ok(Value::Int(len))
+}
+
+fn builtin_set_to_vec(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 1, "set.to_vec")?;
+    let set_rc = expect_set(&args[0])?;
+    let (elem_tag, values) = {
+        let set_ref = set_rc.borrow();
+        let elem_tag = set_ref.elem_type.clone();
+        let vals = set_ref
+            .items
+            .iter()
+            .map(|k| map_key_to_value(k, elem_tag.as_ref()))
+            .collect::<Vec<_>>();
+        (elem_tag, vals)
+    };
+    Ok(make_vec_value(values, elem_tag))
+}
+
+fn ensure_set_compatible(
+    a: &Rc<RefCell<SetValue>>,
+    b: &Rc<RefCell<SetValue>>,
+    op: &str,
+) -> RuntimeResult<TypeTag> {
+    let a_tag = a.borrow().elem_type.clone().unwrap_or(TypeTag::Unknown);
+    let b_tag = b.borrow().elem_type.clone().unwrap_or(TypeTag::Unknown);
+    if a_tag != TypeTag::Unknown && b_tag != TypeTag::Unknown && a_tag != b_tag {
+        return Err(RuntimeError::new(format!(
+            "set op type mismatch: {} vs {}",
+            a_tag.describe(),
+            b_tag.describe()
+        )));
+    }
+    Ok(if a_tag != TypeTag::Unknown {
+        a_tag
+    } else {
+        b_tag
+    })
+}
+
+fn set_union_like(
+    a: &Rc<RefCell<SetValue>>,
+    b: &Rc<RefCell<SetValue>>,
+    op: &str,
+    f: impl Fn(&HashSet<MapKey>, &HashSet<MapKey>) -> HashSet<MapKey>,
+) -> RuntimeResult<Value> {
+    let elem_tag = ensure_set_compatible(a, b, op)?;
+    let a_ref = a.borrow();
+    let b_ref = b.borrow();
+    let keys = f(&a_ref.items, &b_ref.items);
+    simple_ok(make_set_value_from_keys(keys, Some(elem_tag)))
+}
+
+fn builtin_set_union(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 2, "set.union")?;
+    let a = expect_set(&args[0])?;
+    let b = expect_set(&args[1])?;
+    set_union_like(&a, &b, "union", |x, y| x.union(y).cloned().collect())
+}
+
+fn builtin_set_intersection(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 2, "set.intersection")?;
+    let a = expect_set(&args[0])?;
+    let b = expect_set(&args[1])?;
+    set_union_like(&a, &b, "intersection", |x, y| {
+        x.intersection(y).cloned().collect()
+    })
+}
+
+fn builtin_set_difference(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
+    ensure_arity(args, 2, "set.difference")?;
+    let a = expect_set(&args[0])?;
+    let b = expect_set(&args[1])?;
+    set_union_like(&a, &b, "difference", |x, y| {
+        x.difference(y).cloned().collect()
+    })
 }

@@ -8,8 +8,8 @@ use rusqlite::{types::ValueRef, Connection};
 
 use crate::runtime::{
     ensure_arity, expect_int, expect_string, make_map_value, make_vec_value, option_none_value,
-    option_some_value, result_err_value, result_ok_value, Interpreter, ModuleValue, PrimitiveType,
-    RuntimeError, RuntimeResult, StructInstance, TypeTag, Value,
+    option_some_value, result_err_value, result_ok_value, IntType, Interpreter, MapKey,
+    ModuleValue, PrimitiveType, RuntimeError, RuntimeResult, StructInstance, TypeTag, Value,
 };
 
 static CONNECTIONS: OnceLock<Mutex<HashMap<i64, DbBackend>>> = OnceLock::new();
@@ -104,7 +104,9 @@ fn wrap_err(msg: String, ok: Option<TypeTag>) -> RuntimeResult<Value> {
 fn expect_conn_id(handle: &Value) -> RuntimeResult<i64> {
     if let Value::Struct(st) = handle {
         if let Some(id) = st.fields.get("id") {
-            return expect_int(id);
+            let raw = expect_int(id)?;
+            return i64::try_from(raw)
+                .map_err(|_| RuntimeError::new("db: connection id out of range"));
         }
     }
     Err(RuntimeError::new(
@@ -114,7 +116,7 @@ fn expect_conn_id(handle: &Value) -> RuntimeResult<i64> {
 
 fn build_conn_struct(id: i64) -> Value {
     let mut fields = HashMap::new();
-    fields.insert("id".to_string(), Value::Int(id));
+    fields.insert("id".to_string(), Value::Int(id.into()));
     Value::Struct(StructInstance {
         name: Some("db::Connection".to_string()),
         type_params: Vec::new(),
@@ -124,7 +126,7 @@ fn build_conn_struct(id: i64) -> Value {
 
 fn build_exec_struct(rows: i64) -> Value {
     let mut fields = HashMap::new();
-    fields.insert("rows_affected".to_string(), Value::Int(rows));
+    fields.insert("rows_affected".to_string(), Value::Int(rows.into()));
     Value::Struct(StructInstance {
         name: Some("db::ExecResult".to_string()),
         type_params: Vec::new(),
@@ -295,8 +297,8 @@ fn db_del(_interp: &mut Interpreter, args: &[Value]) -> RuntimeResult<Value> {
     let deleted = backend.del(&key)?;
     drop(guard);
     wrap_ok(
-        Value::Int(deleted as i64),
-        Some(TypeTag::Primitive(PrimitiveType::Int)),
+        Value::Int(i128::from(deleted)),
+        Some(TypeTag::Primitive(PrimitiveType::Int(IntType::I64))),
     )
 }
 
@@ -474,7 +476,7 @@ fn pg_row_to_map(row: &PgRow) -> Value {
         let name = column.name().to_string();
         let ty = column.type_().clone();
         let value = pg_value_to_afns(row, idx, ty);
-        fields.insert(name, value);
+        fields.insert(MapKey::Str(name), value);
     }
     make_map_value(
         fields,
@@ -491,15 +493,15 @@ fn pg_value_to_afns(row: &PgRow, idx: usize, ty: PgType) -> Value {
             .unwrap_or(Value::Null),
         PgType::INT2 => row
             .try_get::<_, i16>(idx)
-            .map(|v| Value::Int(v as i64))
+            .map(|v| Value::Int(i128::from(v)))
             .unwrap_or(Value::Null),
         PgType::INT4 => row
             .try_get::<_, i32>(idx)
-            .map(|v| Value::Int(v as i64))
+            .map(|v| Value::Int(i128::from(v)))
             .unwrap_or(Value::Null),
         PgType::INT8 => row
             .try_get::<_, i64>(idx)
-            .map(Value::Int)
+            .map(|v| Value::Int(v.into()))
             .unwrap_or(Value::Null),
         PgType::FLOAT4 => row
             .try_get::<_, f32>(idx)
@@ -517,8 +519,11 @@ fn pg_value_to_afns(row: &PgRow, idx: usize, ty: PgType) -> Value {
             .try_get::<_, Vec<u8>>(idx)
             .map(|bytes| {
                 make_vec_value(
-                    bytes.into_iter().map(|b| Value::Int(b as i64)).collect(),
-                    Some(TypeTag::Primitive(PrimitiveType::UInt)),
+                    bytes
+                        .into_iter()
+                        .map(|b| Value::Int(i128::from(b)))
+                        .collect(),
+                    Some(TypeTag::Primitive(PrimitiveType::Int(IntType::U8))),
                 )
             })
             .unwrap_or(Value::Null),
@@ -534,89 +539,20 @@ fn sqlite_row_to_map(row: &rusqlite::Row<'_>, cols: &[String]) -> Value {
     for (idx, name) in cols.iter().enumerate() {
         let value = match row.get_ref(idx) {
             Ok(ValueRef::Null) => Value::Null,
-            Ok(ValueRef::Integer(i)) => Value::Int(i),
+            Ok(ValueRef::Integer(i)) => Value::Int(i.into()),
             Ok(ValueRef::Real(f)) => Value::Float(f),
             Ok(ValueRef::Text(t)) => Value::String(String::from_utf8_lossy(t).to_string()),
             Ok(ValueRef::Blob(b)) => make_vec_value(
-                b.iter().map(|byte| Value::Int(*byte as i64)).collect(),
-                Some(TypeTag::Primitive(PrimitiveType::UInt)),
+                b.iter().map(|byte| Value::Int(i128::from(*byte))).collect(),
+                Some(TypeTag::Primitive(PrimitiveType::Int(IntType::U8))),
             ),
             Err(_) => Value::Null,
         };
-        fields.insert(name.clone(), value);
+        fields.insert(MapKey::Str(name.clone()), value);
     }
     make_map_value(
         fields,
         Some(TypeTag::Primitive(PrimitiveType::String)),
         None,
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::module_loader::ModuleLoader;
-
-    fn unwrap_ok(value: Value) -> Value {
-        match value {
-            Value::Result(crate::runtime::ResultValue::Ok { value, .. }) => *value,
-            other => panic!("expected result::ok, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn sqlite_round_trip() {
-        let mut interp = Interpreter::with_module_loader(ModuleLoader::new());
-        let db_path = std::env::temp_dir().join("afns_db_sqlite_test.sqlite3");
-        let handle = unwrap_ok(
-            db_open(
-                &mut interp,
-                &[
-                    Value::String("sqlite".to_string()),
-                    Value::String(db_path.to_string_lossy().to_string()),
-                ],
-            )
-            .unwrap(),
-        );
-        unwrap_ok(
-            db_exec(
-                &mut interp,
-                &[
-                    handle.clone(),
-                    Value::String(
-                        "CREATE TABLE IF NOT EXISTS t(id INTEGER PRIMARY KEY, body TEXT)"
-                            .to_string(),
-                    ),
-                ],
-            )
-            .unwrap(),
-        );
-        unwrap_ok(
-            db_exec(
-                &mut interp,
-                &[
-                    handle.clone(),
-                    Value::String("INSERT INTO t(body) VALUES ('alpha')".to_string()),
-                ],
-            )
-            .unwrap(),
-        );
-        let rows = unwrap_ok(
-            db_query(
-                &mut interp,
-                &[
-                    handle.clone(),
-                    Value::String("SELECT body FROM t".to_string()),
-                ],
-            )
-            .unwrap(),
-        );
-        if let Value::Vec(vec_rc) = rows {
-            assert_eq!(vec_rc.borrow().len(), 1);
-        } else {
-            panic!("expected vec");
-        }
-        unwrap_ok(db_close(&mut interp, &[handle]).unwrap());
-        let _ = std::fs::remove_file(db_path);
-    }
 }

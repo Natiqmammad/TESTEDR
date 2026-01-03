@@ -1,0 +1,15 @@
+import forge.log as log;
+
+fun classify(value:: i32) -> str {
+    switch value {
+        0 -> "zero",
+        1 -> "one",
+        _ -> "other",
+    }
+}
+
+fun apex() {
+    log.info(classify(0));
+    log.info(classify(1));
+    log.info(classify(5));
+}

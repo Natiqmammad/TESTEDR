@@ -1,0 +1,9 @@
+import forge.log as log;
+
+fun apex() {
+    let s = set.new();
+    set.insert(s, "a");
+    set.insert(s, "b");
+    log.info("len", set.len(s));
+    log.info("contains a", set.contains(s, "a"));
+}

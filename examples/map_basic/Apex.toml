@@ -1,0 +1,4 @@
+package = "map_basic"
+version = "0.1.0"
+
+[dependencies]

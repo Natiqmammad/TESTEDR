@@ -76,6 +76,15 @@ network.afml
 - **forge.math** - Mathematical operations
 - **forge.android** - Android platform integration (JNI)
 
+### ✅ Collections (Phase 2)
+
+- **Fixed arrays `[T; N]`** — literal syntax `[1, 2, 3]`, fixed length, bounds-checked indexing (`a[i]`), and `a.len()` for length.
+- **Vectors `vec<T>`** — `vec.new()`, `vec.push/pop/get/set/len`, `vec.insert/remove/extend/reverse/sort`; fallible operations return `result` or `option` with clear error messages; nesting (`vec<vec<T>>`) supported.
+- **Nested arrays** — `[ [T; M]; N ]` literals and indexing (`grid[1][0]`).
+- **Maps/Sets** — `map.new/put/get/remove/contains_key/keys/values/items`, `set.new/insert/remove/contains/union/intersection/difference/to_vec` (set keys support str/int/bool).
+- **Tuples** — `(a, b, c)` literals, type `tuple(T1, T2, ...)`, indexed with `t[n]`.
+- **Loops** — iterate arrays/vectors directly or with `for i in 0 .. a.len()` patterns.
+
 ### ✅ Tooling
 
 - **apexrc** - All-in-one CLI (build, run, package manager)
@@ -130,6 +139,238 @@ cargo run -- hello.afml --run
 ```
 Hello, ApexForge NightScript!
 ```
+
+---
+
+## Getting Started (apexrc Workflow)
+
+### Entry Point
+
+AFNS programs start at `fun apex()` (or `async fun apex()` for async entry).
+
+### Typical Workflow
+
+```bash
+apexrc new hello
+cd hello
+# Edit src/main.afml
+apexrc check
+apexrc run
+```
+
+### Project Structure (Quick Reference)
+
+```
+my_project/
+├── Apex.toml
+├── src/
+│   ├── main.afml
+│   └── lib.afml
+└── target/
+```
+
+---
+
+## Syntax Basics
+
+- Statements end with `;`
+- Blocks use `{ ... }`
+- Imports use full paths with optional alias:
+  - `import forge.log as log;`
+  - `import my.module::util;`
+- Keywords are reserved and cannot be used as identifiers:
+  - `import`, `as`, `extern`, `fun`, `async`, `let`, `var`, `const`
+  - `struct`, `enum`, `trait`, `impl`, `return`, `in`
+  - `if`, `else`, `while`, `for`, `switch`, `try`, `catch`
+  - `unsafe`, `assembly`, `slice`, `tuple`, `mut`, `await`
+  - `true`, `false`, `break`, `continue`
+- Statements vs expressions:
+  - `if` can be used as an expression
+  - Blocks used as expressions return the last expression statement (if any), otherwise `()`
+
+---
+
+## Output Methods
+
+- `print(...)` is a builtin that joins arguments with a single space and prints a newline.
+- `forge.log.info(...)` uses the same formatting rules as `print`.
+
+Example:
+```afml
+fun apex() {
+    print("Score:", 42, true);
+}
+```
+
+---
+
+## Comments
+
+- Line comments: `// comment`
+- Block comments: `/* comment */`
+- Block comments do not nest.
+
+---
+
+## Variables
+
+Binding forms:
+
+| Kind | Mutable | Requires initializer | Notes |
+| --- | --- | --- | --- |
+| `let` | no | yes | Immutable after init |
+| `var` | yes | yes | Mutable after init |
+| `const` | no | yes | Must be a literal (no calls/ops yet) |
+
+Examples:
+```afml
+fun apex() {
+    let x = 3;
+    var y = 4;
+    const PI = 3.14159;
+}
+```
+
+Type annotations:
+```afml
+fun apex() {
+    let x:: i64 = 3;
+    var s:: str = "hi";
+    const FLAG:: bool = true;
+}
+```
+
+Errors (runtime diagnostics):
+```afml
+fun apex() {
+    let x = 1;
+    x = 2;          // error: immutable let
+
+    const A = x;    // error: const must be literal
+    let x = 2;      // error: redeclare in same scope
+}
+```
+
+Notes:
+- Shadowing is allowed in inner scopes.
+- Identifiers are ASCII-only.
+
+---
+
+## Composite Types
+
+- Arrays: `[T; N]` with literals like `[1, 2, 3]`; length must match the annotation and `arr[0]` indexes with bounds checks.
+- Vectors: `vec<T>` via `vec.new()`, `vec.push(v, x)`, `vec.len(v)`.
+- Sets: `set<T>` via `set.new()`, `set.insert/contains/len/union/intersection/to_vec`; element types currently `str/int/bool`.
+- Tuples: `tuple(str, i32)` literals like `(\"Alice\", 25)`; tuple indexing with `t[0]` works at runtime.
+- Structs: `struct User { name:: str }` literals `User { name: \"hi\" }`; methods via `impl User { fun greet(self) -> str { ... } }`.
+- Enums: `enum Status { Ok, Error(str) }` with constructors `Status::Ok` / `Status::Error(\"msg\")` and `switch` pattern bindings.
+- Traits: `trait Display { fun to_string(self) -> str; }` + `impl Display for User { ... }`; call with `Display::to_string(u)`.
+- Option: `option.some(x)` / `option.none()` prints as `Some(...)` / `None`.
+- Result: `result.ok(v)` / `result.err(e)` prints as `Ok(...)` / `Err(...)`.
+
+---
+
+## Primitive Types
+
+Supported primitive types:
+- Signed ints: `i8`, `i16`, `i32`, `i64`, `i128`
+- Unsigned ints: `u8`, `u16`, `u32`, `u64`, `u128`
+- Floats: `f32`, `f64`
+- `bool`, `char`, `str`, and unit `()`
+
+Literal examples:
+```afml
+let a:: i32 = 1;
+let b:: u64 = 42;
+let c:: f64 = 3.14;
+let ok:: bool = true;
+let ch:: char = 'a';
+let s:: str = "hi";
+```
+
+Numeric literals:
+- Underscores are allowed: `1_000_000`
+- Base prefixes are not supported yet (no `0x`, `0b`, `0o`)
+
+Arithmetic and comparisons (current rules):
+- Operations require matching types (no implicit widening)
+- No mixed int/float arithmetic
+- Comparisons only between the same types
+- Casting uses `as` for numeric types with range checks; string helpers (`"123".to_i32()`, `"3.14".to_f64()`) return `result`.
+
+## Operators
+
+- Arithmetic: `+ - * / %` on matching numeric types; integer divide/mod by zero raises a runtime error.
+- Comparison: `== != < <= > >=` on same-type numbers/strings; mixed types error.
+- Logical: `&& || !` on bool with short-circuiting (`false && rhs` / `true || rhs` skip `rhs`).
+- Unary: `-` for numbers, `!` for bool.
+- Range: `a..b` creates a half-open integer range for `for` loops (empty if `a >= b`).
+- Assignment: `=` (respects mutability: `let` immutable, `var` mutable).
+
+Precedence (high → low):
+1. Calls / indexing / member access / casts
+2. Unary `! -`
+3. `* / %`
+4. `+ -`
+5. Comparisons `< <= > >=`
+6. Equality `== !=`
+7. Logical AND `&&`
+8. Logical OR `||`
+9. Range `..`
+10. Assignment `=`
+
+## Strings
+
+- UTF-8 string literals in double quotes; escapes: `\n`, `\r`, `\t`, `\\`, `\"`, `\0` (identifiers stay ASCII-only).
+- Concatenate by passing multiple args to `print`/`forge.log.info` (string `+` is not enabled yet).
+- Indexing `s[i]` returns a `char` with bounds checks.
+- Helpers in `forge.str`: `len`, `to_upper`, `to_lower`, `trim`, `split`, `replace`, `find` (returns `option<i64>`), `contains`, `starts_with`, `ends_with`.
+- Parsing helpers: `"123".to_i32()`, `"3.14".to_f64()` return `result<T, str>`.
+- Printing auto-formats numbers/bools alongside strings.
+
+## Control Flow
+
+- `if / else if / else` associate correctly (dangling-else goes to nearest `if`). Conditions must be `bool`.
+- `switch` supports literal patterns and `_` wildcard; first matching arm wins.
+- `check` expression/statement: guard-based branching.
+  - With target: `check value { 1 -> "one", it > 5 -> "big", _ -> "other" }`
+  - Guard-only: `check { cond1 -> expr1, cond2 -> expr2, _ -> expr3 }`
+  - Missing wildcard yields runtime error “check: non-exhaustive”.
+
+## Math & Booleans
+
+- `forge.math` exposes: `pi()`, `sqrt` (result on negatives), `pow`, `abs`, `floor`, `ceil`, `round`, `sin`, `cos`, `tan`, `asin` (result), `acos` (result), `atan`, `atan2`, `exp`, `ln` (result), `log10` (result), `log2` (result), `min`, `max`, `clamp`.
+- Fallible functions return `result<_, str>`; use `?` to propagate (e.g., `let root = math.sqrt(9)?;`).
+- Conditions are strict: `if`/`while` require `bool`. Numbers/strings are not truthy and produce runtime diagnostics.
+
+## Modules & Imports (Python-style)
+
+- Syntax: `import forge;`, `import forge.log as log;`, `import math.utils as utils;`, `import forge.fs::read_to_string;`
+- Resolution order: stdlib (`src/forge`) → vendored packages (`target/vendor/afml/...`) → global packages (`~/.apex/packages/...`) → local project `src/`.
+- File resolution for `import a.b.c`: tries `a/b/c.afml`, then `a/b/c/mod.afml`, then `a/b/c/lib.afml`.
+- `import path::member as alias` loads a module then binds a single exported item.
+
+## Phase 1 Fundamentals Examples
+
+- `examples/minimal_hello` – basic logging
+- `examples/control_flow_if` – if/else branching
+- `examples/control_flow_if_else_if` – else-if chains
+- `examples/math_basic` – math API usage
+- `examples/loop_break_continue` – while/for with break/continue
+- `examples/switch_match_basic` – switch with wildcard
+- `examples/check_basics` / `examples/check_guards` – `check` construct examples
+- `examples/modules_python_style` – dotted imports and module resolution
+
+Run checks quickly with `scripts/phase1_smoke.sh` (requires `apexrc` on PATH).
+
+---
+
+## Casting & Conversions
+
+- Numeric casting: `expr as TargetType` with checked ranges (e.g., `let y:: i64 = x as i64;`). Narrowing or invalid casts raise runtime errors.
+- Float to int requires finite, whole numbers; otherwise errors.
+- String parse helpers: `"123".to_i32()`, `"123".to_i64()`, `"3.14".to_f64()` return `result<T, str>`.
 
 ---
 

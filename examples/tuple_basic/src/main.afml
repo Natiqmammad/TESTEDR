@@ -1,0 +1,11 @@
+import forge.log as log;
+
+fun pair(x:: i32, y:: str) -> tuple(i32, str) {
+    return (x, y);
+}
+
+fun apex() {
+    let t = pair(10, "hi");
+    log.info("tuple second", t[1]);
+    return t[0];
+}

@@ -1,0 +1,18 @@
+import forge.log as log;
+
+enum Status { Ok, Error(str) }
+
+fun describe(s:: Status) -> str {
+    switch s {
+        Ok -> "all good",
+        Error(msg) -> msg,
+        _ -> "unknown",
+    }
+}
+
+fun apex() {
+    let a = Status::Ok;
+    let b = Status::Error("disk");
+    log.info(describe(a));
+    log.info(describe(b));
+}

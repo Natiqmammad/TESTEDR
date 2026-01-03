@@ -1,0 +1,14 @@
+import forge.log as log;
+
+fun apex() {
+    let v:: vec<i32> = vec.new();
+    vec.push(v, 1);
+    vec.push(v, 3);
+    vec.insert(v, 1, 2);
+    log.info("len", vec.len(v));
+    log.info("first", vec.get(v, 0));
+    log.info("middle", vec.get(v, 1));
+    log.info("pop", vec.pop(v));
+    vec.reverse(v);
+    log.info("after reverse", v);
+}

@@ -724,6 +724,7 @@ fun apex() {
     log.info("First:", numbers[0]);
 }
 ```
+Annotated arrays must match their declared length at runtime.
 
 #### Vectors `vec<T>`
 
@@ -753,6 +754,7 @@ fun apex() {
     log.info("Person:", person);
 }
 ```
+Tuple indexing (`person[0]`) is planned but not supported yet.
 
 ### 4.7 Special Types
 
@@ -771,6 +773,7 @@ fun apex() {
     log.info("None:", no_number);
 }
 ```
+`vec`, `option`, and `result` are available from the prelude; no extra imports are required.
 
 #### result<T, E>
 
@@ -792,33 +795,34 @@ fun apex() {
 
 ## 5. Type Casting
 
-### String to Number
+### Numeric casts (`as`)
 
-Use string methods to convert:
+Use `expr as Type` with checked conversions:
 
 ```afml
-import forge.log as log;
-import forge.str as str;
+let x:: i32 = 10;
+let y:: i64 = x as i64;      // widening is ok
+let z:: f64 = y as f64;      // int to float is ok
+```
 
-fun apex() {
-    let num_str = "42";
-    // Type conversion will be added in future releases
-    log.info("String:", num_str);
-}
+If a cast would lose information, it errors:
+- Narrowing out of range (e.g., `i64` large value to `i32`)
+- Casting a float with fractional part to int
+- Casting NaN/inf to int
+
+### String to Number
+
+String helpers return `result<T, str>`:
+
+```afml
+let ok = "123".to_i32();      // Ok(123)
+let bad = "12x".to_i32();     // Err("invalid digit found in string")
+let pi = "3.14".to_f64();     // Ok(3.14)
 ```
 
 ### Number to String
 
-Numbers are automatically converted when printing:
-
-```afml
-import forge.log as log;
-
-fun apex() {
-    let num = 42;
-    log.info("Number as string:", num);
-}
-```
+Numbers format automatically when printing (no extra call needed).
 
 ---
 
@@ -919,6 +923,10 @@ fun apex() {
 }
 ```
 
+`&&` and `||` are short-circuited:
+- `false && expr` does not evaluate `expr`
+- `true || expr` does not evaluate `expr`
+
 ### 6.5 Unary Operators
 
 | Operator | Description | Example |
@@ -945,13 +953,16 @@ fun apex() {
 
 Operators are evaluated in this order (highest to lowest):
 
-1. Unary (`-`, `!`)
-2. Multiplication, Division, Modulus (`*`, `/`, `%`)
-3. Addition, Subtraction (`+`, `-`)
-4. Comparison (`<`, `<=`, `>`, `>=`)
-5. Equality (`==`, `!=`)
-6. Logical AND (`&&`)
-7. Logical OR (`||`)
+1. Calls, indexing, member access, casts (`f(x)`, `obj.field`, `arr[i]`, `expr as T`)
+2. Unary (`-`, `!`)
+3. Multiplication, Division, Modulus (`*`, `/`, `%`)
+4. Addition, Subtraction (`+`, `-`)
+5. Comparison (`<`, `<=`, `>`, `>=`)
+6. Equality (`==`, `!=`)
+7. Logical AND (`&&`)
+8. Logical OR (`||`)
+9. Range (`a..b` produces a half-open range for loops)
+10. Assignment (`=`)
 
 **Use parentheses to make precedence explicit:**
 
@@ -1039,6 +1050,7 @@ Use escape sequences for special characters:
 | `\t` | Tab | `"Name\tAge"` |
 | `\\` | Backslash | `"Path: C:\\Users"` |
 | `\"` | Double quote | `"She said \"Hi\""` |
+| `\0` | Null byte | `"end\0"` |
 
 **Examples:**
 
@@ -1174,9 +1186,11 @@ fun apex() {
     let text = "Hello World";
     let pos = str.find(text, "World");
     
-    log.info("Position:", pos);  // 6
+    log.info("Position:", pos);  // Some(6)
 }
 ```
+
+`str.find` returns `option<i64>`: `Some(index)` when found, `None` otherwise.
 
 #### contains() - Check if Substring Exists
 
@@ -1288,7 +1302,7 @@ import forge.math as math;
 
 fun apex() {
     let x = 16.0;
-    let result = math.sqrt(x);
+    let result = math.sqrt(x)?;  // result<f64, str> on domain errors
     
     log.info("Square root of", x, "is", result);  // 4.0
 }
@@ -1303,12 +1317,12 @@ import forge.math as math;
 fun apex() {
     let radius = 5.0;
     let pi = math.pi();
-    
-    // Circle area = π * r²
     let area = pi * radius * radius;
+    let hyp = math.sqrt(25)?; // Ok(5.0)
     
     log.info("Radius:", radius);
     log.info("Area:", area);  // 78.539...
+    log.info("Hyp:", hyp);
 }
 ```
 
@@ -1323,26 +1337,32 @@ import forge.math as math;
 fun apex() {
     let angle = 0.0;  // radians
     
-    // These functions will be available in future releases
-    // let sine = math.sin(angle);
-    // let cosine = math.cos(angle);
-    // let tangent = math.tan(angle);
+    let sine = math.sin(angle);
+    let cosine = math.cos(angle);
+    let tangent = math.tan(angle);
     
-    log.info("Math module loaded");
+    let arc_sine = math.asin(0.5)?;   // domain-checked: returns result
+    let arc_cos = math.acos(0.5)?;    // domain-checked: returns result
+    let atan = math.atan2(1.0, 1.0);  // plain float
+    
+    log.info("sin:", sine, "cos:", cosine, "tan:", tangent);
+    log.info("asin:", arc_sine, "acos:", arc_cos, "atan2:", atan);
 }
 ```
 
 ### 8.3 Advanced Functions
 
-Future math functions will include:
+Available helpers (all in `forge.math`):
 
-- **Exponential:** `exp()`, `ln()`, `log()`, `log10()`, `log2()`
-- **Power:** `pow()`, `sqrt()`, `cbrt()`
-- **Rounding:** `ceil()`, `floor()`, `round()`, `trunc()`
-- **Utility:** `abs()`, `min()`, `max()`, `clamp()`, `lerp()`
-- **Advanced:** `gamma()`, `beta()`, `sigmoid()`, `tanh()`, `erf()`
+- `pow(base, exp)` → float
+- `abs(x)` → same type (int/float)
+- `floor(x)`, `ceil(x)`, `round(x)` → int stays int; float returns float
+- `exp(x)`, `ln(x)`, `log10(x)`, `log2(x)` (logs return `result<f64, str>` on invalid input)
+- `min(a, b)`, `max(a, b)`, `clamp(x, min, max)` (matching numeric types only)
+- Trig: `sin`, `cos`, `tan`, `asin` (result), `acos` (result), `atan`, `atan2`
+- `sqrt(x)` → `result<f64, str>` (negative input errors)
 
-**Example (conceptual):**
+**Example:**
 
 ```afml
 import forge.log as log;
@@ -1350,14 +1370,16 @@ import forge.math as math;
 
 fun apex() {
     let x = 2.7;
+    let absolute = math.abs(-5.0);
+    let power = math.pow(2.0, 3.0);       // 8.0
+    let ceiling = math.ceil(3.2);         // 4.0
+    let floor = math.floor(3.8);          // 3.0
+    let safe_ln = math.ln(0.0);           // Err("ln domain error...")
     
-    // Future API:
-    // let absolute = math.abs(-5.0);      // 5.0
-    // let power = math.pow(2.0, 3.0);     // 8.0
-    // let ceiling = math.ceil(3.2);       // 4.0
-    // let floor = math.floor(3.8);        // 3.0
-    
-    log.info("Math operations coming soon!");
+    log.info("abs:", absolute);
+    log.info("pow:", power);
+    log.info("ceil/floor:", ceiling, floor);
+    log.info("ln(0):", safe_ln);
 }
 ```
 
@@ -1414,6 +1436,14 @@ fun apex() {
 }
 ```
 
+Conditions must be `bool`. Numbers/strings are not truthy:
+
+```afml
+fun apex() {
+    if 1 { }          // runtime error: expected bool
+}
+```
+
 ### Boolean Operators
 
 ```afml
@@ -1448,6 +1478,25 @@ fun apex() {
     
     if age >= 18 {
         log.info("You are an adult");
+    }
+}
+```
+
+`if` conditions must be `bool`; non-boolean conditions raise a runtime error.
+
+`else if` chains associate with the nearest `if`:
+
+```afml
+fun apex() {
+    let score = 72;
+    if score >= 90 {
+        log.info("A");
+    } else if score >= 80 {
+        log.info("B");
+    } else if score >= 70 {
+        log.info("C");
+    } else {
+        log.info("D or below");
     }
 }
 ```
@@ -1599,6 +1648,8 @@ fun apex() {
 }
 ```
 
+The scrutinee is evaluated once; the first matching arm runs. If no arm matches and there is no `_`, the switch does nothing.
+
 **Output:**
 ```
 Wednesday
@@ -1622,6 +1673,8 @@ fun apex() {
     }
 }
 ```
+
+Supported today: literal patterns (numbers, bools, chars, strings) and the wildcard `_`. Enum/path patterns are planned but not enabled yet.
 
 ### 11.3 Wildcard (_)
 
@@ -1647,9 +1700,9 @@ fun apex() {
 Not Found
 ```
 
-### 11.4 Pattern Matching with Enums
+### 11.4 Pattern Matching with Enums (planned)
 
-Switch is powerful with enums:
+Enum pattern matching will be added later; for now use literal cases and `_`:
 
 ```afml
 import forge.log as log;
@@ -1661,12 +1714,13 @@ enum Status {
 }
 
 fun print_status(s:: Status) {
-    switch s {
-        Ok -> log.info("Everything is fine"),
-        Error(msg) -> log.info("Error:", msg),
-        Warning(code) -> log.info("Warning code:", code),
-        _ -> log.info("Unknown status"),
-    }
+    // Planned syntax (not yet enabled in runtime):
+    // switch s {
+    //     Ok -> log.info("Everything is fine"),
+    //     Error(msg) -> log.info("Error:", msg),
+    //     Warning(code) -> log.info("Warning code:", code),
+    //     _ -> log.info("Unknown status"),
+    // }
 }
 
 fun apex() {
@@ -1675,6 +1729,45 @@ fun apex() {
     print_status(Status::Warning(101));
 }
 ```
+
+---
+
+# check: Guard-Based Branching
+
+`check` is an expression or statement for readable guard chains.
+
+With a target value:
+
+```afml
+import forge.log as log;
+
+fun apex() {
+    let v = 15;
+    let label = check v {
+        1 -> "one",
+        it > 10 -> "big",
+        _ -> "other",
+    };
+    log.info("label:", label);
+}
+```
+
+Guard-only form:
+
+```afml
+fun apex() {
+    let status = check {
+        2 + 2 == 5 -> "impossible",
+        2 + 2 == 4 -> "ok",
+        _ -> "default",
+    };
+}
+```
+
+Rules:
+- Conditions/guards must evaluate to `bool`.
+- If a target is provided, it is available as `it` inside guards/arms.
+- `_` is the wildcard/default. Missing `_` causes a runtime “non-exhaustive” error.
 
 ---
 
@@ -1710,6 +1803,8 @@ Count: 3
 Count: 4
 Done!
 ```
+
+Loop conditions must be `bool`; using numbers or strings will raise a runtime error.
 
 ### 12.2 Loop Control
 
@@ -1819,6 +1914,20 @@ Number: 10
 Number: 20
 Number: 30
 ```
+
+You can also iterate ranges directly with the `..` operator (start inclusive, end exclusive):
+
+```afml
+import forge.log as log;
+
+fun apex() {
+    for i in 0..3 {
+        log.info("i:", i);  // 0, then 1, then 2
+    }
+}
+```
+
+`for` works with `vec`, arrays, and ranges (`start` inclusive, `end` exclusive). `break` exits the nearest loop; `continue` skips to the next iteration. A `do-while` loop is planned but not implemented yet.
 
 ### 12.6 Nested Loops
 
@@ -1944,10 +2053,16 @@ import forge.log as log;
 
 fun apex() {
     let numbers:: [i32; 5] = [10, 20, 30, 40, 50];
-    // Length is known at compile time: 5
-    log.info("Array has 5 elements");
+    log.info("Array length:", numbers.len()); // 5
 }
 ```
+
+**Bounds:** `numbers[i]` is checked at runtime. Accessing an index `< 0` or `>= len` raises an error:  
+`array index out of bounds: idx=10 len=5`
+
+### 13.5 Nested Arrays
+
+Arrays nest naturally: `[[i32; 2]; 2]` and literal `[[1, 2], [3, 4]]`. Index step-by-step: `grid[1][0]` -> `3`. Each dimension is bounds-checked.
 
 ---
 
@@ -1983,6 +2098,27 @@ fun apex() {
     log.info("Vector:", numbers);
 }
 ```
+
+### 14.3 Reading/Writing Elements
+
+- `vec.get(v, idx) -> option<T>` (returns `option.none()` when out of bounds)
+- `vec.set(v, idx, value) -> result<(), str>` (error if out of bounds or type mismatch)
+- `vec.pop(v) -> option<T>`
+- `vec.len(v) -> i64`
+- Nesting works: `vec<vec<i32>>` lets you push inner vectors and access them with `vec.get`.
+- Tuples: `(a, b, c)` with type `tuple(T1, T2, ...)`; index with `t[0]`, `t[1]`. Out-of-bounds raises `tuple index out of bounds`.
+
+All bounds checks are enforced at runtime; errors are descriptive results, never panics.
+
+---
+
+## 15. Maps & Sets
+
+- `map.new()`, `map.put/get/remove/contains_key/keys/values/items`, length via `map.len`.
+- Keys supported: `str`, integers, `bool` (others error with a clear message).
+- Values and keys keep type tags; wrong types return `result.err`.
+- `set.new()`, `set.insert` (returns `result<bool, str>`), `set.remove/contains/len`, `set.to_vec`, `set.union/intersection/difference` (results).
+- Set elements support `str`, integers, and `bool`; other element types error.
 
 ### 14.3 Removing Elements (pop)
 
@@ -4190,6 +4326,7 @@ Import modules:
 import forge;              // Import forge module
 import forge.log as log;   // Import with alias
 import forge.fs::read_to_string;  // Import specific item
+import math.utils as utils;       // Dotted path, Python style
 ```
 
 ### 38.2 Module Structure
@@ -4206,6 +4343,8 @@ myproject/
       mod.afml
       calculus.afml
 ```
+
+Resolution order: stdlib (`src/forge`) → vendored packages (`target/vendor/afml/...`) → global packages (`~/.apex/packages/...`) → local project `src/`. For `import a.b.c`, files tried in order: `a/b/c.afml`, then `a/b/c/mod.afml`, then `a/b/c/lib.afml`. `import path::member as alias` loads the module then binds a single exported item.
 
 ### 38.3 Registry (apexrc)
 
@@ -4489,6 +4628,68 @@ Congratulations! You've completed the comprehensive ApexForge NightScript tutori
 ✅ **Platform Features** - Android, UI (future)  
 ✅ **Advanced Topics** - Memory management, databases, crypto (future)
 
+## Phase 2 Quick Reference (Sets, Tuples, Structs, Enums, Traits)
+
+```afml
+// Sets (str/int/bool keys)
+let s = set.new();
+set.insert(s, "a");
+let has_a = set.contains(s, "a");    // true
+let merged = set.union(s, s);        // result<set<str>, str>
+
+// Tuples
+let t = ("hi", 42);
+let first = t[0];                    // "hi"
+
+// Structs + methods
+struct User { name:: str, age:: i32 }
+impl User { fun greet(self) -> str { return self.name; } }
+let u = User { name: "Ada", age: 30 };
+let msg = u.greet();                 // "Ada"
+
+// Enums + switch binding
+enum Status { Ok, Error(str) }
+let s = Status::Error("fail");
+switch s {
+    Ok -> print("ok");
+    Error(msg) -> print(msg);        // "fail"
+    _ -> print("other");
+}
+
+// Traits (static dispatch)
+trait Display { fun to_string(self) -> str; }
+impl Display for User { fun to_string(self) -> str { return self.name; } }
+print(Display::to_string(u));        // "Ada"
+```
+
+## Scopes & Shadowing
+- Scope chain: global/module → function → block → switch arm → try/catch.
+- The same name cannot be declared twice in a single scope (`let x = 1; let x = 2;` is an error).
+- Inner scopes may shadow outer names: `{ let x = 2; }` while outer `x` remains unchanged.
+- Pattern binders in `switch` and catch variables only live inside their arm/block.
+
+## Method Receiver Rules
+- Methods inside `impl Type { ... }` must start with `self` or `self_mut` as the first parameter.
+- `self_mut` requires the receiver binding to be mutable; otherwise runtime error: `cannot borrow immutable value as mutable (method requires self_mut)`.
+- Method calls `obj.method(a, b)` implicitly pass the receiver as the first argument.
+
+## Argument Evaluation Order
+- Receiver is evaluated first, then arguments left-to-right.
+- Builtins like `print/log` accept varargs; other calls must match arity.
+- Current runtime uses copy semantics for values; no ownership/borrowing model yet.
+
+## Error Handling Basics
+- `result<T, str>` and `option<T>` are built-in; constructors via `result.ok/err`, `option.some/none`.
+- `?` on `result`: `Ok(v)` unwraps, `Err(e)` returns the error from the current function.
+- `?` on `option`: `Some(v)` unwraps; `None` returns `option.none()` only if the function returns `option<T>`, otherwise runtime error.
+- `try { ... } catch(e) { ... }` catches `forge.error.throw` and runtime errors as strings.
+- `panic(msg)` aborts with `panic: msg` (caught by `try` as a string in this phase).
+
+## forge.error
+- `forge.error.new(code, msg) -> "[code] msg"`
+- `forge.error.wrap(err, ctx) -> "ctx: err"`
+- `forge.error.throw(msg)` raises and is caught by `try/catch`; uncaught throw aborts execution.
+
 ## Next Steps
 
 1. **Build a Project** - Create your own AFNS application
@@ -4516,4 +4717,3 @@ apexrc publish            # Publish to registry
 ---
 
 **Happy Coding with ApexForge NightScript! 🚀**
-

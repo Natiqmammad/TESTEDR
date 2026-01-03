@@ -22,6 +22,7 @@ impl Keyword {
             Keyword::Async => "async",
             Keyword::Let => "let",
             Keyword::Var => "var",
+            Keyword::Const => "const",
             Keyword::Struct => "struct",
             Keyword::Enum => "enum",
             Keyword::Trait => "trait",
@@ -43,6 +44,13 @@ impl Keyword {
             Keyword::Await => "await",
             Keyword::True => "true",
             Keyword::False => "false",
+            Keyword::Break => "break",
+            Keyword::Continue => "continue",
+            Keyword::Use => "use",
+            Keyword::Mod => "mod",
+            Keyword::Type => "type",
+            Keyword::Pub => "pub",
+            Keyword::Check => "check",
         }
     }
 }
@@ -56,6 +64,7 @@ pub enum Keyword {
     Async,
     Let,
     Var,
+    Const,
     Struct,
     Enum,
     Trait,
@@ -77,6 +86,13 @@ pub enum Keyword {
     Await,
     True,
     False,
+    Break,
+    Continue,
+    Use,
+    Mod,
+    Type,
+    Pub,
+    Check,
 }
 
 #[derive(Debug, Clone, PartialEq)]

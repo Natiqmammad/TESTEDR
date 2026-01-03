@@ -18,6 +18,21 @@ fun apex() {
     vec.push(numbers, 3);
 
     for n in numbers {
+        if n == 2 {
+            log.info("Skipping 2 using continue");
+            continue;
+        }
         log.info("Number:", n);
+    }
+    
+    log.info("--- Testing While Break ---");
+    var i = 0;
+    while true {
+        i = i + 1;
+        if i > 3 {
+             log.info("Breaking at", i);
+             break;
+        }
+        log.info("While loop:", i);
     }
 }

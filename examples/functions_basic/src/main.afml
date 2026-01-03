@@ -1,0 +1,15 @@
+import forge.log as log;
+
+fun add(x:: i32, y:: i32) -> i32 {
+    return x + y;
+}
+
+fun pair_sum_and_label(x:: i32, y:: i32) -> tuple(i32, str) {
+    return (add(x, y), "done");
+}
+
+fun apex() {
+    let res = pair_sum_and_label(2, 3);
+    log.info("sum", res[0]);
+    log.info("label", res[1]);
+}

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::{ast::File, lexer, native, parser};
+use crate::{ast::File, diagnostics, lexer, native, parser, validation};
 
 #[derive(Clone, Debug)]
 pub struct Module {
@@ -24,6 +24,7 @@ pub struct ModuleLoader {
     modules: HashMap<String, Module>,
     exports: HashMap<String, ExportMeta>,
     java_jars: Vec<PathBuf>,
+    loading_stack: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -90,23 +91,45 @@ impl ModuleLoader {
     }
 
     pub fn load_module(&mut self, name: &str) -> Result<Module> {
-        if let Some(module) = self.modules.get(name) {
+        let normalized = name.replace("::", ".");
+        if let Some(module) = self.modules.get(&normalized) {
             return Ok(module.clone());
         }
-        let segments: Vec<&str> = name.split('.').collect();
+        if self.loading_stack.contains(&normalized) {
+            let mut chain = self.loading_stack.clone();
+            chain.push(normalized.clone());
+            return Err(anyhow!("import cycle detected: {}", chain.join(" -> ")));
+        }
+        self.loading_stack.push(normalized.clone());
+        let segments: Vec<&str> = normalized.split('.').collect();
+        let mut attempts = Vec::new();
         let mut last_err = None;
         for base in &self.search_paths {
-            if let Some(found) = find_module_file(base, &segments) {
-                match self.load_from_path(name, &found) {
+            if let Some(found) = find_module_file(base, &segments, &mut attempts) {
+                match self.load_from_path(&normalized, &found) {
                     Ok(module) => {
-                        self.modules.insert(name.to_string(), module.clone());
+                        self.modules.insert(normalized.clone(), module.clone());
+                        self.loading_stack.pop();
                         return Ok(module);
                     }
                     Err(err) => last_err = Some(err),
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| anyhow!("unable to resolve module `{name}`")))
+        let attempted_list = attempts
+            .iter()
+            .map(|p| format!(" - {}", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let err = last_err.unwrap_or_else(|| {
+            anyhow!(
+                "unable to resolve module `{}`; attempted paths:\n{}",
+                normalized,
+                attempted_list
+            )
+        });
+        self.loading_stack.pop();
+        Err(err)
     }
 
     fn load_from_path(&self, name: &str, path: &Path) -> Result<Module> {
@@ -115,6 +138,15 @@ impl ModuleLoader {
         self.persist_cache(&source)?;
         let tokens = lexer::lex(&source)?;
         let ast = parser::parse_tokens(&source, tokens)?;
+        let validation_errors = validation::validate_file(&ast);
+        if !validation_errors.is_empty() {
+            let message = validation_errors
+                .iter()
+                .map(|err| diagnostics::format_diagnostic(&source, Some(err.span), &err.message))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(anyhow!("module validation failed: {name}\n{message}"));
+        }
         Ok(Module {
             name: name.to_string(),
             path: path.to_path_buf(),
@@ -139,20 +171,23 @@ impl ModuleLoader {
         Ok(())
     }
 
-    fn with_root(root: PathBuf) -> Self {
+    pub fn with_root(root: PathBuf) -> Self {
         let cache_dir = module_cache_dir().unwrap_or_else(|_| root.join(".apex-cache"));
-        let mut search_paths = Vec::new();
-        search_paths.push(root.join("src"));
-        search_paths.push(root.join("src").join("forge"));
+        let mut search_paths = vec![root.join("src")];
         let mut exports = HashMap::new();
         let mut java_jars = Vec::new();
         add_vendor_paths(&mut search_paths, &root, &mut exports, &mut java_jars);
+        let stdlib = root.join("src").join("forge");
+        if stdlib.is_dir() {
+            search_paths.push(stdlib);
+        }
         Self {
             search_paths,
             cache_dir,
             modules: HashMap::new(),
             exports,
             java_jars,
+            loading_stack: Vec::new(),
         }
     }
 
@@ -165,27 +200,83 @@ impl ModuleLoader {
     }
 }
 
-fn find_module_file(base: &Path, segments: &[&str]) -> Option<PathBuf> {
+fn find_module_file(
+    base: &Path,
+    segments: &[&str],
+    attempts: &mut Vec<PathBuf>,
+) -> Option<PathBuf> {
     if !base.exists() {
         return None;
     }
-    let mut joined = base.to_path_buf();
-    for seg in segments {
-        joined.push(seg);
+    // Try against both the base and base/src to support package roots.
+    let candidate_bases = [base.to_path_buf(), base.join("src")];
+    for candidate in candidate_bases.iter() {
+        let mut joined = candidate.clone();
+        for seg in segments {
+            joined.push(seg);
+        }
+        let direct = joined.with_extension("afml");
+        attempts.push(direct.clone());
+        if direct.is_file() {
+            return Some(direct);
+        }
+        let mod_file = joined.join("mod.afml");
+        attempts.push(mod_file.clone());
+        if mod_file.is_file() {
+            return Some(mod_file);
+        }
+        let lib_file = joined.join("lib.afml");
+        attempts.push(lib_file.clone());
+        if lib_file.is_file() {
+            return Some(lib_file);
+        }
     }
-    let direct = joined.with_extension("afml");
-    if direct.is_file() {
-        return Some(direct);
-    }
-    let mod_file = joined.join("mod.afml");
-    if mod_file.is_file() {
-        return Some(mod_file);
-    }
-    let lib_file = joined.join("lib.afml");
-    if lib_file.is_file() {
-        return Some(lib_file);
+    // Special-case vendored package roots like `math_utils@0.1.0`.
+    if let Some(pkg_name) = package_name_from_dir(base) {
+        if !segments.is_empty() && segments[0] == pkg_name {
+            let remainder = &segments[1..];
+            let alt_base = base.join("src");
+            if remainder.is_empty() {
+                let root_mod = alt_base.join("mod.afml");
+                attempts.push(root_mod.clone());
+                if root_mod.is_file() {
+                    return Some(root_mod);
+                }
+                let root_lib = alt_base.join("lib.afml");
+                attempts.push(root_lib.clone());
+                if root_lib.is_file() {
+                    return Some(root_lib);
+                }
+            } else {
+                let mut joined = alt_base.clone();
+                for seg in remainder {
+                    joined.push(seg);
+                }
+                let direct = joined.with_extension("afml");
+                attempts.push(direct.clone());
+                if direct.is_file() {
+                    return Some(direct);
+                }
+                let mod_file = joined.join("mod.afml");
+                attempts.push(mod_file.clone());
+                if mod_file.is_file() {
+                    return Some(mod_file);
+                }
+                let lib_file = joined.join("lib.afml");
+                attempts.push(lib_file.clone());
+                if lib_file.is_file() {
+                    return Some(lib_file);
+                }
+            }
+        }
     }
     None
+}
+
+fn package_name_from_dir(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let (pkg, _) = name.split_once('@').unwrap_or((name, ""));
+    Some(pkg.to_string())
 }
 
 fn module_cache_dir() -> Result<PathBuf> {

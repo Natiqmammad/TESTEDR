@@ -1,0 +1,18 @@
+import forge.log as log;
+
+fun apex() {
+    var nums:: [i32; 4] = [10, 20, 30, 40];
+    log.info("len", nums.len());
+    log.info("first", nums[0]);
+    nums[1] = 25; // write via index
+    log.info("updated", nums[1]);
+
+    // for-loop using length
+    var sum = 0;
+    var i = 0;
+    while i < nums.len() {
+        sum = sum + nums[i];
+        i = i + 1;
+    }
+    log.info("sum", sum);
+}

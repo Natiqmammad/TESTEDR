@@ -1,0 +1,24 @@
+
+import forge.log as log;
+
+enum Status {
+    Ok,
+    Error(str),
+}
+
+fun apex() {
+    log.info("--- Testing Enums ---");
+    let s = Status::Ok;
+    
+    switch s {
+        Ok -> log.info("Got Ok!"),
+        Error(msg) -> log.info("Got Error:", msg),
+        _ -> log.info("Got something else"),
+    }
+    
+    let e = Status::Error("Failure");
+    switch e {
+        Ok -> log.info("Got Ok!"),
+        Error(msg) -> log.info("Got Error:", msg),
+    }
+}

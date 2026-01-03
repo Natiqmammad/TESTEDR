@@ -22,7 +22,7 @@ pub enum LexError {
     InvalidNumber { span: Span },
     #[error("invalid character literal at {span:?}")]
     InvalidCharLiteral { span: Span },
-    #[error("non-ascii identifier character `{ch}` at {span:?}")]
+    #[error("Non-ASCII identifier characters are not allowed")]
     NonAsciiIdentifierChar { ch: char, span: Span },
 }
 
@@ -74,8 +74,29 @@ pub fn format_error(source: &str, error: &AfnsError) -> String {
     }
 }
 
+pub fn format_diagnostic(source: &str, span: Option<Span>, message: &str) -> String {
+    format_with_span(source, span, message)
+}
+
 pub fn print_error(source: &str, error: &AfnsError) {
     eprintln!("{}", format_error(source, error));
+}
+
+pub fn line_col_at(source: &str, index: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut col = 1usize;
+    for (idx, ch) in source.char_indices() {
+        if idx >= index {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
 
 fn format_with_span(source: &str, span: Option<Span>, message: &str) -> String {

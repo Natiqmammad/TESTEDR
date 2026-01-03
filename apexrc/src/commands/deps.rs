@@ -337,6 +337,11 @@ fn print_children(
 pub fn graph_from_lock(ctx: &ProjectContext) -> Result<ResolvedGraph> {
     let lock = Lockfile::load(&lockfile_path(&ctx.root))?;
     if lock.dependencies.is_empty() {
+        if ctx.config.dependencies.is_empty() {
+            return Ok(ResolvedGraph {
+                nodes: BTreeMap::new(),
+            });
+        }
         bail!("lockfile missing; run `apexrc install` to resolve dependencies");
     }
     let mut requirement_lookup: BTreeMap<(String, String), String> = BTreeMap::new();

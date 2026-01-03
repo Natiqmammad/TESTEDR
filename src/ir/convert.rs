@@ -42,6 +42,12 @@ enum Binding {
     Value { value: u32, ty: IrType },
 }
 
+#[derive(Clone, Copy)]
+struct LoopContext {
+    break_target: u32,
+    continue_target: u32,
+}
+
 struct BranchResult {
     env: HashMap<String, Binding>,
     reaches_merge: bool,
@@ -55,6 +61,7 @@ struct FnLower<'a> {
     block_id: u32,
     env: HashMap<String, Binding>,
     scope_stack: Vec<Vec<String>>,
+    loop_stack: Vec<LoopContext>,
     terminated: bool,
 }
 
@@ -66,6 +73,7 @@ impl<'a> FnLower<'a> {
             block_id,
             env: HashMap::new(),
             scope_stack: Vec::new(),
+            loop_stack: Vec::new(),
             terminated: false,
         };
         slf.begin_scope();
@@ -97,6 +105,17 @@ impl<'a> FnLower<'a> {
             scope.push(name.clone());
         }
         self.env.insert(name, binding);
+    }
+
+    fn push_loop(&mut self, break_target: u32, continue_target: u32) {
+        self.loop_stack.push(LoopContext {
+            break_target,
+            continue_target,
+        });
+    }
+
+    fn pop_loop(&mut self) {
+        self.loop_stack.pop();
     }
 
     fn lower_block(&mut self, block: &Block) {
@@ -143,6 +162,12 @@ impl<'a> FnLower<'a> {
             Stmt::Block(block) => {
                 self.lower_block(block);
             }
+            Stmt::Break(_) => {
+                self.lower_loop_control(true);
+            }
+            Stmt::Continue(_) => {
+                self.lower_loop_control(false);
+            }
             _ => {}
         }
     }
@@ -167,6 +192,15 @@ impl<'a> FnLower<'a> {
                 );
             }
             VarKind::Var => {
+                self.declare_var(
+                    decl.name.clone(),
+                    Binding::Value {
+                        value: init_val,
+                        ty,
+                    },
+                );
+            }
+            VarKind::Const => {
                 self.declare_var(
                     decl.name.clone(),
                     Binding::Value {
@@ -526,7 +560,9 @@ impl<'a> FnLower<'a> {
         // body
         self.block_id = loop_body;
         self.terminated = false;
+        self.push_loop(exit, head);
         self.lower_block(body);
+        self.pop_loop();
         if !self.builder.block_has_term(self.func_id, self.block_id) {
             self.builder
                 .set_term(self.func_id, self.block_id, IrTerm::Br { target: head });
@@ -547,6 +583,7 @@ impl<'a> FnLower<'a> {
 
             let head = self.builder.new_block(self.func_id);
             let loop_body = self.builder.new_block(self.func_id);
+            let step = self.builder.new_block(self.func_id);
             let exit = self.builder.new_block(self.func_id);
 
             let pre_block = self.block_id;
@@ -598,7 +635,18 @@ impl<'a> FnLower<'a> {
                     ty: IrType::I32,
                 },
             );
+            self.push_loop(exit, step);
             self.lower_block(body);
+            self.pop_loop();
+            if !self.builder.block_has_term(self.func_id, self.block_id) {
+                self.builder
+                    .set_term(self.func_id, self.block_id, IrTerm::Br { target: step });
+            }
+            self.end_scope();
+
+            // step / continue block
+            self.block_id = step;
+            self.terminated = false;
             let next_idx = self.builder.next_value(self.func_id);
             let one = self.emit_int(1);
             self.builder.emit(
@@ -613,7 +661,6 @@ impl<'a> FnLower<'a> {
             );
             self.builder
                 .set_term(self.func_id, self.block_id, IrTerm::Br { target: head });
-            self.end_scope();
 
             // patch phi for back-edge
             if let Some(incomings) = self
@@ -625,7 +672,7 @@ impl<'a> FnLower<'a> {
                     _ => None,
                 })
             {
-                incomings.push((self.block_id, next_idx));
+                incomings.push((step, next_idx));
             }
 
             self.block_id = exit;
@@ -633,6 +680,19 @@ impl<'a> FnLower<'a> {
         } else {
             // Fallback: do nothing to keep IR valid.
         }
+    }
+
+    fn lower_loop_control(&mut self, is_break: bool) {
+        let target = match self.loop_stack.last() {
+            Some(ctx) if is_break => ctx.break_target,
+            Some(ctx) => ctx.continue_target,
+            None => return,
+        };
+        if !self.builder.block_has_term(self.func_id, self.block_id) {
+            self.builder
+                .set_term(self.func_id, self.block_id, IrTerm::Br { target });
+        }
+        self.terminated = true;
     }
 
     fn lower_expr(&mut self, expr: &Expr) -> Option<u32> {
