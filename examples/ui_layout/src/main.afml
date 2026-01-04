@@ -1,0 +1,43 @@
+// UI Layout Example
+// Demonstrates row, column, and container layout widgets
+
+import forge.gui.native as ui;
+import forge.log as log;
+
+fun apex() {
+    ui.window("Layout Demo", fun(ctx) {
+        // Header in container with padding
+        ui.container(
+            ui.text("Layout Demonstration"),
+            padding=16,
+            bg="#f0f0f0"
+        );
+        
+        // Main content column
+        ui.column([
+            // First row with buttons
+            ui.row([
+                ui.button("Left", fun() { log.info("Left clicked"); }),
+                ui.button("Center", fun() { log.info("Center clicked"); }),
+                ui.button("Right", fun() { log.info("Right clicked"); }),
+            ]),
+            
+            // Nested container
+            ui.container(
+                ui.column([
+                    ui.text("Section A"),
+                    ui.text("Section B"),
+                    ui.text("Section C"),
+                ]),
+                padding=12,
+                margin=8
+            ),
+            
+            // Footer row
+            ui.row([
+                ui.text("Status: Ready"),
+                ui.button("Refresh", fun() { log.info("Refresh clicked"); }),
+            ]),
+        ]);
+    });
+}

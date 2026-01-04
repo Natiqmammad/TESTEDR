@@ -13,4 +13,5 @@ pub mod registry;
 pub mod run;
 pub mod single;
 pub mod uninstall;
+pub mod web;
 pub mod whoami;

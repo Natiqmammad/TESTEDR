@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use futures::future::LocalBoxFuture;
 use postgres::{types::Type as PgType, Client as PgClient, NoTls, Row as PgRow};
 use redis::{Commands, Connection as RedisConnection};
 use rusqlite::{types::ValueRef, Connection};
@@ -134,7 +135,10 @@ fn build_exec_struct(rows: i64) -> Value {
     })
 }
 
-fn db_open(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn db_open(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "db.open")?;
         let backend = expect_string(&args[0])?;
@@ -142,7 +146,10 @@ fn db_open(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, R
 
         match backend.as_str() {
             "sqlite" => {
-                let path = target.strip_prefix("sqlite:").unwrap_or(&target).to_string();
+                let path = target
+                    .strip_prefix("sqlite:")
+                    .unwrap_or(&target)
+                    .to_string();
                 match Connection::open(path) {
                     Ok(conn) => {
                         let id = next_conn_id();
@@ -167,7 +174,9 @@ fn db_open(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, R
                 Err(e) => wrap_err(e.to_string(), Some(conn_tag())),
             },
             "redis" => {
-                match redis::Client::open(target.as_str()).and_then(|client| client.get_connection()) {
+                match redis::Client::open(target.as_str())
+                    .and_then(|client| client.get_connection())
+                {
                     Ok(conn) => {
                         let id = next_conn_id();
                         connections()
@@ -187,7 +196,10 @@ fn db_open(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, R
     })
 }
 
-fn db_close(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn db_close(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "db.close")?;
         let id = expect_conn_id(&args[0])?;
@@ -196,7 +208,10 @@ fn db_close(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, 
     })
 }
 
-fn db_exec(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn db_exec(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "db.exec")?;
         let id = expect_conn_id(&args[0])?;
@@ -212,7 +227,10 @@ fn db_exec(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, R
     })
 }
 
-fn db_query(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn db_query(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "db.query")?;
         let id = expect_conn_id(&args[0])?;
@@ -228,7 +246,10 @@ fn db_query(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, 
     })
 }
 
-fn db_begin_tx(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn db_begin_tx(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "db.begin")?;
         let id = expect_conn_id(&args[0])?;
@@ -242,7 +263,10 @@ fn db_begin_tx(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'stati
     })
 }
 
-fn db_commit_tx(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn db_commit_tx(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "db.commit")?;
         let id = expect_conn_id(&args[0])?;
@@ -256,7 +280,10 @@ fn db_commit_tx(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'stat
     })
 }
 
-fn db_rollback_tx(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn db_rollback_tx(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "db.rollback")?;
         let id = expect_conn_id(&args[0])?;
@@ -270,7 +297,10 @@ fn db_rollback_tx(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'st
     })
 }
 
-fn db_get(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn db_get(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "db.get")?;
         let id = expect_conn_id(&args[0])?;
@@ -286,7 +316,10 @@ fn db_get(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, Ru
     })
 }
 
-fn db_set(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn db_set(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 3, "db.set")?;
         let id = expect_conn_id(&args[0])?;
@@ -303,7 +336,10 @@ fn db_set(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, Ru
     })
 }
 
-fn db_del(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn db_del(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "db.del")?;
         let id = expect_conn_id(&args[0])?;

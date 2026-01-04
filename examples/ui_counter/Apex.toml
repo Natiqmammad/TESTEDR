@@ -1,0 +1,7 @@
+[package]
+name = "ui_counter"
+version = "0.1.0"
+language = "afml"
+description = "Counter example with state"
+
+[dependencies]

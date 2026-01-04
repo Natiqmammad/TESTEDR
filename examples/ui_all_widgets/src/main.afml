@@ -1,0 +1,43 @@
+// Comprehensive Widget Test
+// Tests all basic widgets: Text, Button, Row, Column, Container
+
+import forge.gui.native as ui;
+import forge.log as log;
+
+fun apex() {
+    ui.window("Widget Test", fun(ctx) {
+        // Main column layout
+        ctx.column([
+            // Header container
+            ui.container(
+                ctx.text("Widget Showcase"),
+                padding=20,
+                bg="#3498db"
+            ),
+            
+            // Row with multiple buttons
+            ctx.row([
+                ctx.button("Red", fun() { log.info("Red clicked"); }),
+                ctx.button("Green", fun() { log.info("Green clicked"); }),
+                ctx.button("Blue", fun() { log.info("Blue clicked"); }),
+            ]),
+            
+            // Nested containers
+            ui.container(
+                ctx.column([
+                    ctx.text("Nested Column 1"),
+                    ctx.text("Nested Column 2"),
+                    ctx.row([
+                        ctx.text("Row Item A"),
+                        ctx.text("Row Item B"),
+                    ]),
+                ]),
+                padding=16,
+                margin=8
+            ),
+            
+            // Footer
+            ctx.text("Footer Text"),
+        ]);
+    });
+}

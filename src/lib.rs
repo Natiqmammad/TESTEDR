@@ -14,6 +14,7 @@
 // especially for Android JNI integration
 
 pub mod ast;
+pub mod bytecode;
 pub mod codegen;
 pub mod diagnostics;
 pub mod ir;

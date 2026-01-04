@@ -1,0 +1,7 @@
+[package]
+name = "ui_layout"
+version = "0.1.0"
+language = "afml"
+description = "Layout example with row, column, and container"
+
+[dependencies]

@@ -16,7 +16,7 @@ mod vendor_index;
 
 use commands::{
     build, check, clean, deps, doctor, init, install, login as login_cmd, new, perf, run, single,
-    uninstall, whoami as whoami_cmd,
+    uninstall, web, whoami as whoami_cmd,
 };
 use config::ApexConfig;
 
@@ -25,6 +25,8 @@ enum TargetArg {
     X86,
     #[value(alias = "x86_64")]
     X86_64,
+    /// Web target (no WASM)
+    Web,
 }
 
 impl From<TargetArg> for build::BuildTarget {
@@ -32,6 +34,7 @@ impl From<TargetArg> for build::BuildTarget {
         match arg {
             TargetArg::X86 => build::BuildTarget::X86,
             TargetArg::X86_64 => build::BuildTarget::X86_64,
+            TargetArg::Web => build::BuildTarget::X86_64, // Web uses interpreter, not native target
         }
     }
 }
@@ -78,6 +81,10 @@ enum Command {
     Build {
         #[arg(long, value_name = "DIR")]
         manifest_path: Option<PathBuf>,
+        #[arg(long, value_name = "DIR")]
+        project: Option<PathBuf>,
+        #[arg(long, value_name = "FILE")]
+        entry: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "x86_64")]
         target: TargetArg,
         #[arg(long)]
@@ -89,6 +96,12 @@ enum Command {
     Run {
         #[arg(long, value_name = "DIR")]
         manifest_path: Option<PathBuf>,
+        #[arg(long, value_name = "DIR")]
+        project: Option<PathBuf>,
+        #[arg(long, value_name = "FILE")]
+        entry: Option<PathBuf>,
+        #[arg(long)]
+        port: Option<u16>,
         #[arg(long, value_enum, default_value = "x86_64")]
         target: TargetArg,
         #[arg(long)]
@@ -221,39 +234,60 @@ fn main() -> Result<()> {
         }
         Some(Command::Build {
             manifest_path,
+            project,
+            entry: _,
             target,
             release,
             dump_ir,
         }) => {
-            let mut ctx = ProjectContext::load(manifest_path)?;
-            install::install(&ctx, true, quiet)?;
-            let target = build::BuildTarget::from(target);
-            let profile = if release {
-                build::BuildProfile::Release
+            let path_to_use = manifest_path.or(project);
+            let manifest_path_resolved = resolve_manifest_path(path_to_use)?;
+
+            // Check if web target
+            if matches!(target, TargetArg::Web) {
+                web::build_web(&manifest_path_resolved)?;
             } else {
-                build::BuildProfile::Debug
-            };
-            let _ = build::build_project(&mut ctx, target, profile, dump_ir)?;
+                let mut ctx = ProjectContext::load(Some(manifest_path_resolved))?;
+                install::install(&ctx, true, quiet)?;
+                let target = build::BuildTarget::from(target);
+                let profile = if release {
+                    build::BuildProfile::Release
+                } else {
+                    build::BuildProfile::Debug
+                };
+                let _ = build::build_project(&mut ctx, target, profile, dump_ir)?;
+            }
         }
         Some(Command::Run {
             manifest_path,
+            project,
+            entry: _,
+            port,
             target,
             release,
             dump_ir,
             ui,
         }) => {
-            let mut ctx = ProjectContext::load(manifest_path)?;
-            install::install(&ctx, true, quiet)?;
-            let target = build::BuildTarget::from(target);
-            let profile = if release {
-                build::BuildProfile::Release
+            let path_to_use = manifest_path.or(project);
+            let manifest_path_resolved = resolve_manifest_path(path_to_use)?;
+
+            // Check if web target
+            if matches!(target, TargetArg::Web) {
+                web::run_web(&manifest_path_resolved, port)?;
             } else {
-                build::BuildProfile::Debug
-            };
-            if ui {
-                run::run_project_with_ui(&mut ctx, target, profile, dump_ir)?;
-            } else {
-                run::run_project(&mut ctx, target, profile, dump_ir)?;
+                let mut ctx = ProjectContext::load(Some(manifest_path_resolved))?;
+                install::install(&ctx, true, quiet)?;
+                let target = build::BuildTarget::from(target);
+                let profile = if release {
+                    build::BuildProfile::Release
+                } else {
+                    build::BuildProfile::Debug
+                };
+                if ui {
+                    run::run_project_with_ui(&mut ctx, target, profile, dump_ir)?;
+                } else {
+                    run::run_project(&mut ctx, target, profile, dump_ir)?;
+                }
             }
         }
         Some(Command::Check { manifest_path }) => {

@@ -1,0 +1,14 @@
+// UI Hello World Example
+// Demonstrates basic text and button with event handling
+
+import forge.gui.native as ui;
+import forge.log as log;
+
+fun apex() {
+    ui.window("Hello", fun(ctx) {
+        ctx.text("Hello A");
+        ctx.button("Log", fun() {
+            log.info("Button clicked!");
+        });
+    });
+}

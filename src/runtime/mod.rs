@@ -1,4 +1,4 @@
-use std::cell::{RefCell, Cell};
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::fmt;
@@ -14,9 +14,9 @@ use std::sync::OnceLock; // Removed Mutex
 use std::thread;
 use std::time::{Duration, Instant};
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::Mutex;
-use tokio::io::{AsyncReadExt, AsyncWriteExt}; // For read/write traits
+use tokio::sync::Mutex; // For read/write traits
 
 use crate::ast::{
     Block, CheckPattern, Expr, File, FunctionSignature, IfStmt, Import, Item, Literal, NamedType,
@@ -24,10 +24,10 @@ use crate::ast::{
 };
 use crate::module_loader::{ExportMeta, ExportSchema, ModuleLoader};
 use crate::span::Span;
+use async_recursion::async_recursion;
+use futures::future::{BoxFuture, FutureExt, LocalBoxFuture, Shared};
 use java_runtime::JavaRuntime;
 use libloading::Library;
-use futures::future::{BoxFuture, LocalBoxFuture, Shared, FutureExt};
-use async_recursion::async_recursion;
 
 #[cfg(target_os = "android")]
 pub mod android;
@@ -42,6 +42,15 @@ pub mod android {
 mod forge;
 mod java_runtime;
 pub mod web;
+
+// Stub Shutdown enum for tokio TCP shutdown compatibility
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub enum Shutdown {
+    Read,
+    Write,
+    Both,
+}
 
 #[derive(Debug, Clone)]
 pub enum RuntimeError {
@@ -1775,9 +1784,7 @@ impl FutureValue {
     pub fn new_spawn(interp: Interpreter, func: Value, args: Vec<Value>) -> Self {
         let func_clone = func.clone();
         let args_clone = args.clone();
-        let fut = async move {
-            interp.invoke(func_clone, args_clone, None).await
-        };
+        let fut = async move { interp.invoke(func_clone, args_clone, None).await };
         Self::new(Box::pin(fut), FutureKind::Spawn { func, args })
     }
 
@@ -1787,7 +1794,13 @@ impl FutureValue {
             tokio::time::sleep(Duration::from_millis(ms)).await;
             interp.invoke(cb_clone, Vec::new(), None).await
         };
-        Self::new(Box::pin(fut), FutureKind::Timeout { duration_ms: ms, callback })
+        Self::new(
+            Box::pin(fut),
+            FutureKind::Timeout {
+                duration_ms: ms,
+                callback,
+            },
+        )
     }
 
     pub fn new_then(interp: Interpreter, base: FutureValue, callback: Value) -> Self {
@@ -1797,7 +1810,13 @@ impl FutureValue {
             let res = base_fut.await?;
             interp.invoke(cb_clone, vec![res], None).await
         };
-        Self::new(Box::pin(fut), FutureKind::Then { base: Box::new(base), on_ok: callback })
+        Self::new(
+            Box::pin(fut),
+            FutureKind::Then {
+                base: Box::new(base),
+                on_ok: callback,
+            },
+        )
     }
 
     pub fn new_catch(interp: Interpreter, base: FutureValue, callback: Value) -> Self {
@@ -1807,11 +1826,19 @@ impl FutureValue {
             match base_fut.await {
                 Ok(v) => Ok(v),
                 Err(e) => {
-                    interp.invoke(cb_clone, vec![Value::String(e.to_string())], None).await
+                    interp
+                        .invoke(cb_clone, vec![Value::String(e.to_string())], None)
+                        .await
                 }
             }
         };
-        Self::new(Box::pin(fut), FutureKind::Catch { base: Box::new(base), on_err: callback })
+        Self::new(
+            Box::pin(fut),
+            FutureKind::Catch {
+                base: Box::new(base),
+                on_err: callback,
+            },
+        )
     }
 
     pub fn new_finally(interp: Interpreter, base: FutureValue, callback: Value) -> Self {
@@ -1822,21 +1849,34 @@ impl FutureValue {
             interp.invoke(cb_clone, Vec::new(), None).await?;
             res
         };
-        Self::new(Box::pin(fut), FutureKind::Finally { base: Box::new(base), on_finally: callback })
+        Self::new(
+            Box::pin(fut),
+            FutureKind::Finally {
+                base: Box::new(base),
+                on_finally: callback,
+            },
+        )
     }
 
     pub fn new_parallel(tasks: Vec<Value>) -> Self {
-        let futures: Vec<_> = tasks.iter().filter_map(|v| {
-            if let Value::Future(f) = v { Some(f.future.clone()) } else { None }
-        }).collect();
+        let futures: Vec<_> = tasks
+            .iter()
+            .filter_map(|v| {
+                if let Value::Future(f) = v {
+                    Some(f.future.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
         // Just wait for all.
         let fut = async move {
             futures::future::join_all(futures).await; // results ignored?
-            // parallel returns list of results?
-            // Existing logic seemed to return list of results.
-            // join_all returns Vec<Result>.
-            // We need to collect them.
-            // But types?
+                                                      // parallel returns list of results?
+                                                      // Existing logic seemed to return list of results.
+                                                      // join_all returns Vec<Result>.
+                                                      // We need to collect them.
+                                                      // But types?
             Ok(Value::Null) // Stub. Improve if needed.
         };
         Self::new(Box::pin(fut), FutureKind::Parallel { tasks })
@@ -2080,7 +2120,8 @@ pub struct UserFunction {
     pub forced_type_args: Option<Vec<TypeTag>>,
 }
 
-type BuiltinFn = for<'a> fn(&'a Interpreter, Vec<Value>) -> LocalBoxFuture<'a, RuntimeResult<Value>>;
+type BuiltinFn =
+    for<'a> fn(&'a Interpreter, Vec<Value>) -> LocalBoxFuture<'a, RuntimeResult<Value>>;
 
 #[derive(Clone)]
 pub struct Interpreter {
@@ -2137,7 +2178,11 @@ impl Interpreter {
         Ok(())
     }
 
-    pub async fn call_function_by_name(&self, name: &str, args: Vec<Value>) -> RuntimeResult<Value> {
+    pub async fn call_function_by_name(
+        &self,
+        name: &str,
+        args: Vec<Value>,
+    ) -> RuntimeResult<Value> {
         let value = self.globals.get(name)?;
         self.invoke(value, args, None).await
     }
@@ -2154,11 +2199,7 @@ impl Interpreter {
                         def.name.clone(),
                         StructSchema {
                             name: def.name.clone(),
-                            type_params: def
-                                .type_params
-                                .iter()
-                                .map(|p| p.name.clone())
-                                .collect(),
+                            type_params: def.type_params.iter().map(|p| p.name.clone()).collect(),
                             fields,
                         },
                     );
@@ -2172,17 +2213,15 @@ impl Interpreter {
                         def.name.clone(),
                         EnumSchema {
                             name: def.name.clone(),
-                            type_params: def
-                                .type_params
-                                .iter()
-                                .map(|p| p.name.clone())
-                                .collect(),
+                            type_params: def.type_params.iter().map(|p| p.name.clone()).collect(),
                             variants,
                         },
                     );
                 }
                 Item::Trait(def) => {
-                    self.trait_defs.borrow_mut().insert(def.name.clone(), def.clone());
+                    self.trait_defs
+                        .borrow_mut()
+                        .insert(def.name.clone(), def.clone());
                     let mut fields = HashMap::new();
                     for method in &def.methods {
                         fields.insert(
@@ -2230,17 +2269,21 @@ impl Interpreter {
                             return_type: method.signature.return_type.clone(),
                             forced_type_args: None,
                         };
-                        let method_map = if let Some(trait_name) = &trait_key {
+                        if let Some(trait_name) = &trait_key {
                             self.trait_impls
                                 .borrow_mut()
                                 .entry(trait_name.clone())
                                 .or_default()
                                 .entry(type_key.clone())
                                 .or_default()
+                                .insert(method.signature.name.clone(), func);
                         } else {
-                            self.inherent_impls.borrow_mut().entry(type_key.clone()).or_default()
-                        };
-                        method_map.insert(method.signature.name.clone(), func);
+                            self.inherent_impls
+                                .borrow_mut()
+                                .entry(type_key.clone())
+                                .or_default()
+                                .insert(method.signature.name.clone(), func);
+                        }
                     }
                 }
                 _ => {}
@@ -2275,11 +2318,7 @@ impl Interpreter {
         }
     }
 
-    fn load_items_into_env(
-        &self,
-        env: &Env,
-        ast: &File,
-    ) -> RuntimeResult<HashMap<String, Value>> {
+    fn load_items_into_env(&self, env: &Env, ast: &File) -> RuntimeResult<HashMap<String, Value>> {
         let mut defined = HashMap::new();
         for item in &ast.items {
             match item {
@@ -2384,14 +2423,14 @@ impl Interpreter {
                     .clone()
                     .or_else(|| Some(member.clone()))
                     .ok_or_else(|| RuntimeError::new("invalid import binding"))?;
-                    env.define(binding, field);
+                env.define(binding, field);
             } else {
                 let binding = import
                     .alias
                     .clone()
                     .or_else(|| import.path.last().cloned())
                     .ok_or_else(|| RuntimeError::new("invalid import path"))?;
-                    env.define(binding, Value::Module(module));
+                env.define(binding, Value::Module(module));
             }
         }
         Ok(())
@@ -2446,7 +2485,9 @@ impl Interpreter {
                 }
             }
         };
-        self.modules.borrow_mut().insert(name.to_string(), module_value.clone());
+        self.modules
+            .borrow_mut()
+            .insert(name.to_string(), module_value.clone());
         Ok(module_value)
     }
 
@@ -2569,10 +2610,11 @@ impl Interpreter {
         }
     }
 
-    fn exports_not_implemented(_: &Interpreter, _: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-        Box::pin(async move {
-            Err(RuntimeError::new("FFI exports are not implemented yet"))
-        })
+    fn exports_not_implemented(
+        _: &Interpreter,
+        _: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move { Err(RuntimeError::new("FFI exports are not implemented yet")) })
     }
 
     #[async_recursion(?Send)]
@@ -2659,8 +2701,9 @@ impl Interpreter {
             Stmt::If(if_stmt) => {
                 let cond = self.eval_expr_typed(&if_stmt.condition, env).await?;
                 if expect_bool_value(cond.value, "if condition")? {
-                    let signal =
-                        self.execute_block(&if_stmt.then_branch, env.clone(), loop_depth).await?;
+                    let signal = self
+                        .execute_block(&if_stmt.then_branch, env.clone(), loop_depth)
+                        .await?;
                     if !matches!(signal, ExecSignal::None) {
                         return Ok(signal);
                     }
@@ -2696,7 +2739,9 @@ impl Interpreter {
                     if !expect_bool_value(cond.value, "while condition")? {
                         break;
                     }
-                    let signal = self.execute_block(body, env.clone(), loop_depth + 1).await?;
+                    let signal = self
+                        .execute_block(body, env.clone(), loop_depth + 1)
+                        .await?;
                     match signal {
                         ExecSignal::Return(_) => return Ok(signal),
                         ExecSignal::Break => break,
@@ -2788,7 +2833,10 @@ impl Interpreter {
         env: &Env,
         loop_depth: usize,
     ) -> RuntimeResult<ExecSignal> {
-        match self.execute_block(&try_stmt.try_block, env.clone(), loop_depth).await {
+        match self
+            .execute_block(&try_stmt.try_block, env.clone(), loop_depth)
+            .await
+        {
             Ok(signal) => Ok(signal),
             Err(err) => {
                 let mut catch_value = Value::String(err.to_string());
@@ -2799,7 +2847,8 @@ impl Interpreter {
                 if let Some(binding) = &try_stmt.catch_binding {
                     catch_env.define(binding.clone(), catch_value);
                 }
-                self.execute_block(&try_stmt.catch_block, catch_env, loop_depth).await
+                self.execute_block(&try_stmt.catch_block, catch_env, loop_depth)
+                    .await
             }
         }
     }
@@ -2910,7 +2959,9 @@ impl Interpreter {
     }
 
     async fn eval_expr(&self, expr: &Expr, env: &Env) -> RuntimeResult<Value> {
-        self.eval_expr_typed(expr, env).await.map(|typed| typed.value)
+        self.eval_expr_typed(expr, env)
+            .await
+            .map(|typed| typed.value)
     }
 
     #[async_recursion(?Send)]
@@ -3050,7 +3101,9 @@ impl Interpreter {
                             .collect::<Vec<_>>(),
                     )
                 };
-                let result = self.invoke(callee_val, evaluated_args, explicit_types).await?;
+                let result = self
+                    .invoke(callee_val, evaluated_args, explicit_types)
+                    .await?;
                 Ok(TypedValue {
                     tag: Some(value_type_tag(&result)),
                     value: result,
@@ -3355,7 +3408,11 @@ impl Interpreter {
                     }
                     Value::Option(OptionValue::Some { value, .. }) => Ok(*value),
                     Value::Option(OptionValue::None { elem_type }) => {
-                        let return_tag = self.return_type_stack.borrow().last().and_then(|t| t.clone());
+                        let return_tag = self
+                            .return_type_stack
+                            .borrow()
+                            .last()
+                            .and_then(|t| t.clone());
                         let expects_option = matches!(return_tag, Some(TypeTag::Option(_)));
                         if expects_option {
                             Err(RuntimeError::propagate(Value::Option(OptionValue::None {
@@ -3536,19 +3593,21 @@ impl Interpreter {
                                         ));
                                     }
                                 }
-                                let func = self
-                                    .trait_impls
-                                    .borrow()
-                                    .get(&tm.trait_name)
-                                    .and_then(|m| m.get(&type_key))
-                                    .and_then(|m| m.get(&tm.signature.name))
-                                    .ok_or_else(|| {
-                                        RuntimeError::new(format!(
-                                            "trait bound not satisfied: {} for {}",
-                                            tm.trait_name, type_key
-                                        ))
-                                    })?;
-                                self.call_user_function(func.clone(), evaluated_args).await?
+                                let func = {
+                                    let impls = self.trait_impls.borrow();
+                                    impls
+                                        .get(&tm.trait_name)
+                                        .and_then(|m| m.get(&type_key))
+                                        .and_then(|m| m.get(&tm.signature.name))
+                                        .cloned()
+                                        .ok_or_else(|| {
+                                            RuntimeError::new(format!(
+                                                "trait bound not satisfied: {} for {}",
+                                                tm.trait_name, type_key
+                                            ))
+                                        })?
+                                };
+                                self.call_user_function(func, evaluated_args).await?
                             }
                             other => self.invoke(other, evaluated_args, None).await?,
                         };
@@ -3581,8 +3640,9 @@ impl Interpreter {
                                     ));
                                 }
                             }
-                            let result =
-                                self.call_user_function(func.clone(), evaluated_args.clone()).await?;
+                            let result = self
+                                .call_user_function(func.clone(), evaluated_args.clone())
+                                .await?;
                             return Ok(TypedValue {
                                 tag: Some(value_type_tag(&result)),
                                 value: result,
@@ -4206,7 +4266,11 @@ impl Interpreter {
         }
     }
 
-    async fn call_user_function(&self, func: UserFunction, args: Vec<Value>) -> RuntimeResult<Value> {
+    async fn call_user_function(
+        &self,
+        func: UserFunction,
+        args: Vec<Value>,
+    ) -> RuntimeResult<Value> {
         if func.is_async {
             return Ok(make_future(FutureValue::new_spawn(
                 self.clone(),
@@ -4339,7 +4403,6 @@ fn stmt_span(stmt: &Stmt) -> Span {
         Stmt::Break(span) | Stmt::Continue(span) => *span,
     }
 }
-
 
 fn register_builtins(env: &Env) {
     let log_module = Value::Module(ModuleValue {
@@ -4518,31 +4581,52 @@ fn register_builtins(env: &Env) {
     });
 
     // Phase 2 UI core (stub bindings; actual rendering wired later)
-    fn builtin_ui_run_app(_interp: &Interpreter, _args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn builtin_ui_run_app(
+        _interp: &Interpreter,
+        _args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move { Ok(Value::Null) })
     }
 
-    fn builtin_ui_text(_interp: &Interpreter, _args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn builtin_ui_text(
+        _interp: &Interpreter,
+        _args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move { Ok(Value::Null) })
     }
 
-    fn builtin_ui_button(_interp: &Interpreter, _args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn builtin_ui_button(
+        _interp: &Interpreter,
+        _args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move { Ok(Value::Null) })
     }
 
-    fn builtin_ui_column(_interp: &Interpreter, _args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn builtin_ui_column(
+        _interp: &Interpreter,
+        _args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move { Ok(Value::Null) })
     }
 
-    fn builtin_ui_row(_interp: &Interpreter, _args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn builtin_ui_row(
+        _interp: &Interpreter,
+        _args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move { Ok(Value::Null) })
     }
 
-    fn builtin_ui_spacer(_interp: &Interpreter, _args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn builtin_ui_spacer(
+        _interp: &Interpreter,
+        _args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move { Ok(Value::Null) })
     }
 
-    fn builtin_ui_container(_interp: &Interpreter, _args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn builtin_ui_container(
+        _interp: &Interpreter,
+        _args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move { Ok(Value::Null) })
     }
     let ui_module = Value::Module(ModuleValue {
@@ -4638,7 +4722,10 @@ fn register_builtins(env: &Env) {
     );
 }
 
-fn builtin_log_info(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_log_info(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         let line = args
             .iter()
@@ -4650,7 +4737,10 @@ fn builtin_log_info(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'
     })
 }
 
-fn builtin_print(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_print(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         let line = args
             .iter()
@@ -4662,7 +4752,10 @@ fn builtin_print(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'sta
     })
 }
 
-fn builtin_panic(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_panic(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         let message = args
             .get(0)
@@ -4673,7 +4766,10 @@ fn builtin_panic(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'sta
 }
 
 fn error_module() -> Value {
-    fn builtin_error_new(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn builtin_error_new(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 2, "error.new")?;
             let code = expect_string(&args[0])?;
@@ -4682,7 +4778,10 @@ fn error_module() -> Value {
         })
     }
 
-    fn builtin_error_wrap(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn builtin_error_wrap(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 2, "error.wrap")?;
             let err = expect_string(&args[0])?;
@@ -4691,7 +4790,10 @@ fn error_module() -> Value {
         })
     }
 
-    fn builtin_error_throw(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn builtin_error_throw(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "error.throw")?;
             let msg = expect_string(&args[0])?;
@@ -4699,7 +4801,10 @@ fn error_module() -> Value {
         })
     }
 
-    fn builtin_error_fail(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn builtin_error_fail(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 2, "error.fail")?;
             let code = expect_string(&args[0])?;
@@ -4768,7 +4873,7 @@ fn fs_module() -> Value {
                     #[cfg(unix)]
                     {
                         if let Ok(link_target) = tokio::fs::read_link(&path).await {
-                             let _ = tokio::fs::symlink(&link_target, &target).await;
+                            let _ = tokio::fs::symlink(&link_target, &target).await;
                         }
                     }
                     #[cfg(windows)]
@@ -4795,7 +4900,10 @@ fn fs_module() -> Value {
         matches!(err.raw_os_error(), Some(18) | Some(17))
     }
 
-    fn fs_read_to_string(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_read_to_string(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "fs.read_to_string")?;
             let path = expect_string(&args[0])?;
@@ -4807,7 +4915,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_read_bytes(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_read_bytes(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "fs.read_bytes")?;
             let path = expect_string(&args[0])?;
@@ -4823,7 +4934,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_write_string(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_write_string(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 2, "fs.write_string")?;
             let path = expect_string(&args[0])?;
@@ -4835,7 +4949,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_write_bytes(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_write_bytes(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 2, "fs.write_bytes")?;
             let path = expect_string(&args[0])?;
@@ -4853,7 +4970,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_append_string(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_append_string(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 2, "fs.append_string")?;
             let path = expect_string(&args[0])?;
@@ -4876,7 +4996,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_append_bytes(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_append_bytes(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 2, "fs.append_bytes")?;
             let path = expect_string(&args[0])?;
@@ -4895,9 +5018,9 @@ fn fs_module() -> Value {
             {
                 Ok(mut f) => {
                     if let Err(e) = f.write_all(&data).await {
-                         io_err_to_result(e, unit_tag())
+                        io_err_to_result(e, unit_tag())
                     } else {
-                         wrap_ok(Value::Null, unit_tag())
+                        wrap_ok(Value::Null, unit_tag())
                     }
                 }
                 Err(e) => io_err_to_result(e, unit_tag()),
@@ -4905,7 +5028,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_create_dir(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_create_dir(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "fs.create_dir")?;
             let path = expect_string(&args[0])?;
@@ -4921,7 +5047,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_create_dir_all(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_create_dir_all(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "fs.create_dir_all")?;
             let path = expect_string(&args[0])?;
@@ -4932,7 +5061,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_remove_dir(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_remove_dir(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "fs.remove_dir")?;
             let path = expect_string(&args[0])?;
@@ -4943,8 +5075,11 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_remove_dir_all(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_remove_dir_all(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "fs.remove_dir_all")?;
             let path = expect_string(&args[0])?;
             match tokio::fs::remove_dir_all(&path).await {
@@ -4954,37 +5089,51 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_exists(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_exists(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "fs.exists")?;
             let path = expect_string(&args[0])?;
-            Ok(Value::Bool(tokio::fs::try_exists(&path).await.unwrap_or(false)))
+            Ok(Value::Bool(
+                tokio::fs::try_exists(&path).await.unwrap_or(false),
+            ))
         })
     }
 
-    fn fs_is_file(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_is_file(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "fs.is_file")?;
             let path = expect_string(&args[0])?;
             match tokio::fs::metadata(&path).await {
-                 Ok(m) => Ok(Value::Bool(m.is_file())),
-                 Err(_) => Ok(Value::Bool(false))
+                Ok(m) => Ok(Value::Bool(m.is_file())),
+                Err(_) => Ok(Value::Bool(false)),
             }
         })
     }
 
-    fn fs_is_dir(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_is_dir(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "fs.is_dir")?;
             let path = expect_string(&args[0])?;
-             match tokio::fs::metadata(&path).await {
-                 Ok(m) => Ok(Value::Bool(m.is_dir())),
-                 Err(_) => Ok(Value::Bool(false))
+            match tokio::fs::metadata(&path).await {
+                Ok(m) => Ok(Value::Bool(m.is_dir())),
+                Err(_) => Ok(Value::Bool(false)),
             }
         })
     }
 
-    fn fs_metadata(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_metadata(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "fs.metadata")?;
             let path = expect_string(&args[0])?;
@@ -5002,7 +5151,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_join(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_join(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 2, "fs.join")?;
             let base = expect_string(&args[0])?;
@@ -5012,7 +5164,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_dirname(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_dirname(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "fs.dirname")?;
             let path = expect_string(&args[0])?;
@@ -5024,7 +5179,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_parent(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_parent(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "fs.parent")?;
             let path = expect_string(&args[0])?;
@@ -5044,7 +5202,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_basename(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_basename(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "fs.basename")?;
             let path = expect_string(&args[0])?;
@@ -5056,7 +5217,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_file_stem(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_file_stem(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "fs.file_stem")?;
             let path = expect_string(&args[0])?;
@@ -5076,7 +5240,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_extension(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_extension(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "fs.extension")?;
             let path = expect_string(&args[0])?;
@@ -5096,7 +5263,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_canonicalize(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_canonicalize(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "fs.canonicalize")?;
             let path = expect_string(&args[0])?;
@@ -5108,7 +5278,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_is_absolute(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_is_absolute(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "fs.is_absolute")?;
             let path = expect_string(&args[0])?;
@@ -5116,7 +5289,10 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_strip_prefix(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_strip_prefix(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 2, "fs.strip_prefix")?;
             let base = expect_string(&args[0])?;
@@ -5132,8 +5308,11 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_symlink_metadata(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_symlink_metadata(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "fs.symlink_metadata")?;
             let path = expect_string(&args[0])?;
             let meta_tag = Some(TypeTag::Struct {
@@ -5150,8 +5329,11 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_current_dir(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_current_dir(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 0, "fs.current_dir")?;
             let tag = Some(TypeTag::Primitive(PrimitiveType::String));
             match std::env::current_dir() {
@@ -5161,16 +5343,22 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_temp_dir(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_temp_dir(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 0, "fs.temp_dir")?;
             let tmp = std::env::temp_dir();
             Ok(Value::String(tmp.to_string_lossy().to_string()))
         })
     }
 
-    fn fs_temp_file(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_temp_file(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 0, "fs.temp_file")?;
             let tmp = std::env::temp_dir();
             let now = std::time::SystemTime::now()
@@ -5193,7 +5381,10 @@ fn fs_module() -> Value {
                             )
                         }
                         Err(e) => {
-                            return io_err_to_result(e, Some(TypeTag::Primitive(PrimitiveType::String)))
+                            return io_err_to_result(
+                                e,
+                                Some(TypeTag::Primitive(PrimitiveType::String)),
+                            )
                         }
                     }
                 }
@@ -5204,8 +5395,11 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_copy_file(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_copy_file(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "fs.copy_file")?;
             let src = expect_string(&args[0])?;
             let dst = expect_string(&args[1])?;
@@ -5216,12 +5410,18 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_copy(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_copy(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         fs_copy_file(_interp, args)
     }
 
-    fn fs_move(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_move(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "fs.move")?;
             let src = expect_string(&args[0])?;
             let dst = expect_string(&args[1])?;
@@ -5229,25 +5429,31 @@ fn fs_module() -> Value {
                 Ok(_) => wrap_ok(Value::Null, unit_tag()),
                 Err(e) => {
                     if is_cross_device(&e) {
-                         let is_dir = if let Ok(m) = tokio::fs::metadata(&src).await { m.is_dir() } else { false };
-                         let copy_result = if is_dir {
-                             match copy_dir_recursive_impl(
+                        let is_dir = if let Ok(m) = tokio::fs::metadata(&src).await {
+                            m.is_dir()
+                        } else {
+                            false
+                        };
+                        let copy_result = if is_dir {
+                            match copy_dir_recursive_impl(
                                 std::path::Path::new(&src).to_path_buf(),
                                 std::path::Path::new(&dst).to_path_buf(),
-                             ).await {
+                            )
+                            .await
+                            {
                                 Ok(_) => tokio::fs::remove_dir_all(&src).await,
-                                Err(e) => Err(e)
-                             }
-                         } else {
-                             match tokio::fs::copy(&src, &dst).await {
-                                 Ok(_) => tokio::fs::remove_file(&src).await,
-                                Err(e) => Err(e)
-                             }
-                         };
-                         return match copy_result {
-                             Ok(_) => wrap_ok(Value::Null, unit_tag()),
-                             Err(err) => io_err_to_result(err, unit_tag()),
-                         };
+                                Err(e) => Err(e),
+                            }
+                        } else {
+                            match tokio::fs::copy(&src, &dst).await {
+                                Ok(_) => tokio::fs::remove_file(&src).await,
+                                Err(e) => Err(e),
+                            }
+                        };
+                        return match copy_result {
+                            Ok(_) => wrap_ok(Value::Null, unit_tag()),
+                            Err(err) => io_err_to_result(err, unit_tag()),
+                        };
                     } else {
                         return io_err_to_result(e, unit_tag());
                     }
@@ -5256,12 +5462,18 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_rename(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn fs_rename(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         fs_move(_interp, args)
     }
 
-    fn fs_remove_file(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_remove_file(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "fs.remove_file")?;
             let path = expect_string(&args[0])?;
             match tokio::fs::remove_file(&path).await {
@@ -5271,8 +5483,11 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_touch(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_touch(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "fs.touch")?;
             let path = expect_string(&args[0])?;
             match tokio::fs::OpenOptions::new()
@@ -5288,8 +5503,11 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_read_link(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_read_link(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "fs.read_link")?;
             let path = expect_string(&args[0])?;
             match tokio::fs::read_link(&path).await {
@@ -5302,8 +5520,11 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_is_symlink(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_is_symlink(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "fs.is_symlink")?;
             let path = expect_string(&args[0])?;
             match tokio::fs::symlink_metadata(&path).await {
@@ -5313,8 +5534,11 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_hard_link(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_hard_link(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "fs.hard_link")?;
             let src = expect_string(&args[0])?;
             let dst = expect_string(&args[1])?;
@@ -5325,8 +5549,11 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_symlink_file(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_symlink_file(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "fs.symlink_file")?;
             let src = expect_string(&args[0])?;
             let dst = expect_string(&args[1])?;
@@ -5342,8 +5569,11 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_symlink_dir(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_symlink_dir(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "fs.symlink_dir")?;
             let src = expect_string(&args[0])?;
             let dst = expect_string(&args[1])?;
@@ -5358,22 +5588,26 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_set_readonly(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_set_readonly(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "fs.set_readonly")?;
             let path = expect_string(&args[0])?;
             let readonly = match &args[1] {
                 Value::Bool(b) => *b,
                 _ => return Err(RuntimeError::new("fs.set_readonly expects bool")),
             };
-            
-            // tokio fs doesn't have permissions manipulation easily exposed? 
+
+            // tokio fs doesn't have permissions manipulation easily exposed?
             // set_permissions exists.
             let res = async {
                 let mut perms = tokio::fs::metadata(&path).await?.permissions();
                 perms.set_readonly(readonly);
                 tokio::fs::set_permissions(&path, perms).await
-            }.await;
+            }
+            .await;
 
             match res {
                 Ok(_) => wrap_ok(Value::Null, unit_tag()),
@@ -5382,12 +5616,15 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_chmod(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_chmod(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "fs.chmod")?;
             let path = expect_string(&args[0])?;
             let mode = expect_int(&args[1])?;
-            
+
             let res = async {
                 #[cfg(unix)]
                 {
@@ -5397,29 +5634,14 @@ fn fs_module() -> Value {
                 }
                 #[cfg(not(unix))]
                 {
-                     let readonly = mode & 0o200 == 0;
-                     let mut perms = tokio::fs::metadata(&path).await?.permissions();
-                     perms.set_readonly(readonly);
-                     tokio::fs::set_permissions(&path, perms).await
+                    let readonly = mode & 0o200 == 0;
+                    let mut perms = tokio::fs::metadata(&path).await?.permissions();
+                    perms.set_readonly(readonly);
+                    tokio::fs::set_permissions(&path, perms).await
                 }
-            }.await;
-
-             match res {
-                Ok(_) => wrap_ok(Value::Null, unit_tag()),
-                Err(e) => io_err_to_result(e, unit_tag()),
             }
-        })
-    }
+            .await;
 
-    fn fs_copy_permissions(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
-            ensure_arity(&args, 2, "fs.copy_permissions")?;
-            let src = expect_string(&args[0])?;
-            let dst = expect_string(&args[1])?;
-            let res = async {
-                let perms = tokio::fs::metadata(&src).await?.permissions();
-                tokio::fs::set_permissions(&dst, perms).await
-            }.await;
             match res {
                 Ok(_) => wrap_ok(Value::Null, unit_tag()),
                 Err(e) => io_err_to_result(e, unit_tag()),
@@ -5427,8 +5649,31 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_read_dir(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_copy_permissions(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
+            ensure_arity(&args, 2, "fs.copy_permissions")?;
+            let src = expect_string(&args[0])?;
+            let dst = expect_string(&args[1])?;
+            let res = async {
+                let perms = tokio::fs::metadata(&src).await?.permissions();
+                tokio::fs::set_permissions(&dst, perms).await
+            }
+            .await;
+            match res {
+                Ok(_) => wrap_ok(Value::Null, unit_tag()),
+                Err(e) => io_err_to_result(e, unit_tag()),
+            }
+        })
+    }
+
+    fn fs_read_dir(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "fs.read_dir")?;
             let path = expect_string(&args[0])?;
             let mut entries_vec = Vec::new();
@@ -5441,30 +5686,30 @@ fn fs_module() -> Value {
             match tokio::fs::read_dir(&path).await {
                 Ok(mut read_dir) => {
                     while let Ok(Some(entry)) = read_dir.next_entry().await {
-                            let p = entry.path();
-                            let meta = entry.metadata().await.ok();
-                            let is_file = meta.as_ref().map(|m| m.is_file()).unwrap_or(false);
-                            let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
-                            let mut fields = HashMap::new();
-                            fields.insert(
-                                "path".to_string(),
-                                Value::String(p.to_string_lossy().to_string()),
-                            );
-                            fields.insert(
-                                "file_name".to_string(),
-                                Value::String(
-                                    p.file_name()
-                                        .map(|s| s.to_string_lossy().to_string())
-                                        .unwrap_or_default(),
-                                ),
-                            );
-                            fields.insert("is_file".to_string(), Value::Bool(is_file));
-                            fields.insert("is_dir".to_string(), Value::Bool(is_dir));
-                            entries_vec.push(Value::Struct(StructInstance {
-                                name: Some("fs::DirEntry".to_string()),
-                                type_params: Vec::new(),
-                                fields,
-                            }));
+                        let p = entry.path();
+                        let meta = entry.metadata().await.ok();
+                        let is_file = meta.as_ref().map(|m| m.is_file()).unwrap_or(false);
+                        let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+                        let mut fields = HashMap::new();
+                        fields.insert(
+                            "path".to_string(),
+                            Value::String(p.to_string_lossy().to_string()),
+                        );
+                        fields.insert(
+                            "file_name".to_string(),
+                            Value::String(
+                                p.file_name()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_default(),
+                            ),
+                        );
+                        fields.insert("is_file".to_string(), Value::Bool(is_file));
+                        fields.insert("is_dir".to_string(), Value::Bool(is_dir));
+                        entries_vec.push(Value::Struct(StructInstance {
+                            name: Some("fs::DirEntry".to_string()),
+                            type_params: Vec::new(),
+                            fields,
+                        }));
                     }
                     wrap_ok(make_vec_value(entries_vec, Some(dir_entry_tag)), vec_tag)
                 }
@@ -5473,8 +5718,11 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_ensure_dir(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_ensure_dir(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "fs.ensure_dir")?;
             let path = expect_string(&args[0])?;
             match tokio::fs::create_dir_all(&path).await {
@@ -5484,8 +5732,11 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_components(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_components(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "fs.components")?;
             let path = expect_string(&args[0])?;
             let comps = std::path::Path::new(&path)
@@ -5501,8 +5752,11 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_read_lines(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_read_lines(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "fs.read_lines")?;
             let path = expect_string(&args[0])?;
             let elem_tag = TypeTag::Primitive(PrimitiveType::String);
@@ -5520,8 +5774,11 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_write_lines(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_write_lines(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "fs.write_lines")?;
             let path = expect_string(&args[0])?;
             let vec_rc = expect_vec(&args[1])?;
@@ -5540,13 +5797,21 @@ fn fs_module() -> Value {
         })
     }
 
-    fn fs_copy_dir_recursive(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn fs_copy_dir_recursive(
+        _interp: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "fs.copy_dir_recursive")?;
             let src = expect_string(&args[0])?;
             let dst = expect_string(&args[1])?;
 
-            match copy_dir_recursive_impl(std::path::Path::new(&src).to_path_buf(), std::path::Path::new(&dst).to_path_buf()).await {
+            match copy_dir_recursive_impl(
+                std::path::Path::new(&src).to_path_buf(),
+                std::path::Path::new(&dst).to_path_buf(),
+            )
+            .await
+            {
                 Ok(_) => wrap_ok(Value::Null, unit_tag()),
                 Err(e) => io_err_to_result(e, unit_tag()),
             }
@@ -5728,7 +5993,10 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_tcp_connect(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn net_tcp_connect(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "net.tcp_connect")?;
             let addr = expect_string(&args[0])?;
@@ -5755,7 +6023,10 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_tcp_listen(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    fn net_tcp_listen(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
         Box::pin(async move {
             ensure_arity(&args, 1, "net.tcp_listen")?;
             let addr = expect_string(&args[0])?;
@@ -5783,8 +6054,11 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_tcp_accept(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_tcp_accept(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "net.tcp_accept")?;
             let listener_id = expect_handle(&args[0], "net::Listener")?;
             let mut listeners = listeners().lock().await;
@@ -5796,7 +6070,7 @@ fn net_module() -> Value {
                     let id = NEXT_NET_ID.fetch_add(1, Ordering::SeqCst);
                     // drop listeners lock before acquiring sockets lock to avoid deadlock
                     drop(listeners);
-                    
+
                     sockets().lock().await.insert(id, stream);
                     wrap_ok(
                         socket_struct(id),
@@ -5817,8 +6091,11 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_tcp_send(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_tcp_send(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "net.tcp_send")?;
             let id = expect_handle(&args[0], "net::Socket")?;
             let vec_rc = expect_vec(&args[1])?;
@@ -5839,8 +6116,11 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_tcp_recv(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_tcp_recv(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "net.tcp_recv")?;
             let id = expect_handle(&args[0], "net::Socket")?;
             let len = int_to_usize(expect_int(&args[1])?, "receive length")?;
@@ -5872,8 +6152,11 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_close_socket(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_close_socket(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "net.close_socket")?;
             let id = expect_handle(&args[0], "net::Socket")?;
             sockets().lock().await.remove(&id);
@@ -5881,8 +6164,11 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_close_listener(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_close_listener(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "net.close_listener")?;
             let id = expect_handle(&args[0], "net::Listener")?;
             listeners().lock().await.remove(&id);
@@ -5890,8 +6176,11 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_udp_bind(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_udp_bind(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "net.udp_bind")?;
             let addr = expect_string(&args[0])?;
             match UdpSocket::bind(&addr).await {
@@ -5917,8 +6206,11 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_udp_send_to(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_udp_send_to(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 3, "net.udp_send_to")?;
             let id = expect_handle(&args[0], "net::UdpSocket")?;
             let vec_rc = expect_vec(&args[1])?;
@@ -5946,8 +6238,11 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_udp_recv_from(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_udp_recv_from(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "net.udp_recv_from")?;
             let id = expect_handle(&args[0], "net::UdpSocket")?;
             let len = int_to_usize(expect_int(&args[1])?, "receive length")?;
@@ -6009,12 +6304,15 @@ fn net_module() -> Value {
         }
     }
 
-    fn net_tcp_shutdown(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_tcp_shutdown(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "net.tcp_shutdown")?;
             let id = expect_handle(&args[0], "net::Socket")?;
             let how = expect_string(&args[1])?;
-            let shutdown = match how.as_str() {
+            let _shutdown = match how.as_str() {
                 "read" => Shutdown::Read,
                 "write" => Shutdown::Write,
                 "both" => Shutdown::Both,
@@ -6035,8 +6333,11 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_tcp_set_nodelay(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_tcp_set_nodelay(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "net.tcp_set_nodelay")?;
             let id = expect_handle(&args[0], "net::Socket")?;
             let flag = match args[1] {
@@ -6054,8 +6355,11 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_tcp_peer_addr(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_tcp_peer_addr(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "net.tcp_peer_addr")?;
             let id = expect_handle(&args[0], "net::Socket")?;
             let sockets = sockets().lock().await;
@@ -6075,8 +6379,11 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_tcp_local_addr(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_tcp_local_addr(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "net.tcp_local_addr")?;
             let id = expect_handle(&args[0], "net::Socket")?;
             let sockets = sockets().lock().await;
@@ -6096,22 +6403,31 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_tcp_set_read_timeout(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_tcp_set_read_timeout(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "net.tcp_set_read_timeout")?;
-             Err(RuntimeError::new("net.tcp_set_read_timeout is not supported in async mode. Use future.timeout() instead."))
+            Err(RuntimeError::new("net.tcp_set_read_timeout is not supported in async mode. Use future.timeout() instead."))
         })
     }
 
-    fn net_tcp_set_write_timeout(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_tcp_set_write_timeout(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "net.tcp_set_write_timeout")?;
             Err(RuntimeError::new("net.tcp_set_write_timeout is not supported in async mode. Use future.timeout() instead."))
         })
     }
 
-    fn net_udp_connect(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_udp_connect(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "net.udp_connect")?;
             let id = expect_handle(&args[0], "net::UdpSocket")?;
             let addr = expect_string(&args[1])?;
@@ -6126,8 +6442,11 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_udp_send(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_udp_send(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "net.udp_send")?;
             let id = expect_handle(&args[0], "net::UdpSocket")?;
             let vec_rc = expect_vec(&args[1])?;
@@ -6154,8 +6473,11 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_udp_recv(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_udp_recv(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "net.udp_recv")?;
             let id = expect_handle(&args[0], "net::UdpSocket")?;
             let len = int_to_usize(expect_int(&args[1])?, "receive length")?;
@@ -6187,8 +6509,11 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_udp_peer_addr(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_udp_peer_addr(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "net.udp_peer_addr")?;
             let id = expect_handle(&args[0], "net::UdpSocket")?;
             let udps = udps().lock().await;
@@ -6208,8 +6533,11 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_udp_local_addr(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_udp_local_addr(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 1, "net.udp_local_addr")?;
             let id = expect_handle(&args[0], "net::UdpSocket")?;
             let udps = udps().lock().await;
@@ -6229,8 +6557,11 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_udp_set_broadcast(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_udp_set_broadcast(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "net.udp_set_broadcast")?;
             let id = expect_handle(&args[0], "net::UdpSocket")?;
             let flag = match args[1] {
@@ -6248,17 +6579,23 @@ fn net_module() -> Value {
         })
     }
 
-    fn net_udp_set_read_timeout(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_udp_set_read_timeout(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "net.udp_set_read_timeout")?;
             Err(RuntimeError::new("net.udp_set_read_timeout is not supported in async mode. Use future.timeout() instead."))
         })
     }
 
-    fn net_udp_set_write_timeout(_i: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-         Box::pin(async move {
+    fn net_udp_set_write_timeout(
+        _i: &Interpreter,
+        args: Vec<Value>,
+    ) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+        Box::pin(async move {
             ensure_arity(&args, 2, "net.udp_set_write_timeout")?;
-             Err(RuntimeError::new("net.udp_set_write_timeout is not supported in async mode. Use future.timeout() instead."))
+            Err(RuntimeError::new("net.udp_set_write_timeout is not supported in async mode. Use future.timeout() instead."))
         })
     }
 
@@ -6403,7 +6740,10 @@ fn math_ok_float_result(value: f64) -> RuntimeResult<Value> {
     ))
 }
 
-fn builtin_math_sqrt(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_sqrt(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "math.sqrt")?;
         let num = expect_number(&args[0], "math.sqrt")?.as_f64();
@@ -6414,7 +6754,10 @@ fn builtin_math_sqrt(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<
     })
 }
 
-fn builtin_math_pow(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_pow(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "math.pow")?;
         let base = expect_number(&args[0], "math.pow")?.as_f64();
@@ -6423,7 +6766,10 @@ fn builtin_math_pow(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'
     })
 }
 
-fn builtin_math_abs(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_abs(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "math.abs")?;
         match expect_number(&args[0], "math.abs")? {
@@ -6433,7 +6779,10 @@ fn builtin_math_abs(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'
     })
 }
 
-fn builtin_math_floor(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_floor(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "math.floor")?;
         match expect_number(&args[0], "math.floor")? {
@@ -6443,7 +6792,10 @@ fn builtin_math_floor(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
     })
 }
 
-fn builtin_math_ceil(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_ceil(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "math.ceil")?;
         match expect_number(&args[0], "math.ceil")? {
@@ -6453,7 +6805,10 @@ fn builtin_math_ceil(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<
     })
 }
 
-fn builtin_math_round(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_round(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "math.round")?;
         match expect_number(&args[0], "math.round")? {
@@ -6463,7 +6818,10 @@ fn builtin_math_round(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
     })
 }
 
-fn builtin_math_sin(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_sin(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "math.sin")?;
         let angle = expect_number(&args[0], "math.sin")?.as_f64();
@@ -6471,7 +6829,10 @@ fn builtin_math_sin(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'
     })
 }
 
-fn builtin_math_cos(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_cos(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "math.cos")?;
         let angle = expect_number(&args[0], "math.cos")?.as_f64();
@@ -6479,7 +6840,10 @@ fn builtin_math_cos(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'
     })
 }
 
-fn builtin_math_tan(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_tan(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "math.tan")?;
         let angle = expect_number(&args[0], "math.tan")?.as_f64();
@@ -6487,7 +6851,10 @@ fn builtin_math_tan(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'
     })
 }
 
-fn builtin_math_asin(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_asin(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "math.asin")?;
         let v = expect_number(&args[0], "math.asin")?.as_f64();
@@ -6498,7 +6865,10 @@ fn builtin_math_asin(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<
     })
 }
 
-fn builtin_math_acos(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_acos(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "math.acos")?;
         let v = expect_number(&args[0], "math.acos")?.as_f64();
@@ -6509,7 +6879,10 @@ fn builtin_math_acos(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<
     })
 }
 
-fn builtin_math_atan(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_atan(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "math.atan")?;
         let v = expect_number(&args[0], "math.atan")?.as_f64();
@@ -6517,7 +6890,10 @@ fn builtin_math_atan(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<
     })
 }
 
-fn builtin_math_atan2(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_atan2(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "math.atan2")?;
         let y = expect_number(&args[0], "math.atan2")?.as_f64();
@@ -6526,7 +6902,10 @@ fn builtin_math_atan2(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
     })
 }
 
-fn builtin_math_exp(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_exp(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "math.exp")?;
         let v = expect_number(&args[0], "math.exp")?.as_f64();
@@ -6534,7 +6913,10 @@ fn builtin_math_exp(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'
     })
 }
 
-fn builtin_math_ln(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_ln(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "math.ln")?;
         let v = expect_number(&args[0], "math.ln")?.as_f64();
@@ -6545,7 +6927,10 @@ fn builtin_math_ln(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'s
     })
 }
 
-fn builtin_math_log10(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_log10(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "math.log10")?;
         let v = expect_number(&args[0], "math.log10")?.as_f64();
@@ -6556,7 +6941,10 @@ fn builtin_math_log10(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
     })
 }
 
-fn builtin_math_log2(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_log2(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "math.log2")?;
         let v = expect_number(&args[0], "math.log2")?.as_f64();
@@ -6567,7 +6955,10 @@ fn builtin_math_log2(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<
     })
 }
 
-fn builtin_math_min(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_min(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "math.min")?;
         let nums = expect_same_numeric_kind(&args[0..2], "math.min")?;
@@ -6579,7 +6970,10 @@ fn builtin_math_min(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'
     })
 }
 
-fn builtin_math_max(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_max(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "math.max")?;
         let nums = expect_same_numeric_kind(&args[0..2], "math.max")?;
@@ -6591,12 +6985,17 @@ fn builtin_math_max(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'
     })
 }
 
-fn builtin_math_clamp(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_clamp(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 3, "math.clamp")?;
         let nums = expect_same_numeric_kind(&args[0..3], "math.clamp")?;
         match (nums[0], nums[1], nums[2]) {
-            (Number::Int(x), Number::Int(min), Number::Int(max)) => Ok(Value::Int(x.clamp(min, max))),
+            (Number::Int(x), Number::Int(min), Number::Int(max)) => {
+                Ok(Value::Int(x.clamp(min, max)))
+            }
             (Number::Float(x), Number::Float(min), Number::Float(max)) => {
                 Ok(Value::Float(x.clamp(min, max)))
             }
@@ -6605,7 +7004,10 @@ fn builtin_math_clamp(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
     })
 }
 
-fn builtin_math_pi(_interp: &Interpreter, _args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_math_pi(
+    _interp: &Interpreter,
+    _args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move { Ok(Value::Float(std::f64::consts::PI)) })
 }
 
@@ -6629,14 +7031,20 @@ fn simple_ok(value: Value) -> RuntimeResult<Value> {
     ))
 }
 
-fn builtin_vec_new(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_vec_new(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 0, "vec.new")?;
         Ok(make_vec_value(Vec::new(), None))
     })
 }
 
-fn builtin_vec_push(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_vec_push(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "vec.push")?;
         let vec_rc = expect_vec(&args[0])?;
@@ -6656,7 +7064,10 @@ fn builtin_vec_push(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'
     })
 }
 
-fn builtin_vec_pop(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_vec_pop(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "vec.pop")?;
         let vec_rc = expect_vec(&args[0])?;
@@ -6668,7 +7079,10 @@ fn builtin_vec_pop(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'s
     })
 }
 
-fn builtin_vec_len(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_vec_len(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "vec.len")?;
         let vec_rc = expect_vec(&args[0])?;
@@ -6680,7 +7094,10 @@ fn builtin_vec_len(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'s
     })
 }
 
-fn builtin_vec_get(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_vec_get(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "vec.get")?;
         let vec_rc = expect_vec(&args[0])?;
@@ -6698,7 +7115,10 @@ fn builtin_vec_get(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'s
     })
 }
 
-fn builtin_vec_set(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_vec_set(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 3, "vec.set")?;
         let vec_rc = expect_vec(&args[0])?;
@@ -6725,7 +7145,10 @@ fn builtin_vec_set(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'s
     })
 }
 
-fn builtin_str_len(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_str_len(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "str.len")?;
         let s = expect_string(&args[0])?;
@@ -6733,7 +7156,10 @@ fn builtin_str_len(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'s
     })
 }
 
-fn builtin_str_to_upper(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_str_to_upper(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "str.to_upper")?;
         let s = expect_string(&args[0])?;
@@ -6741,7 +7167,10 @@ fn builtin_str_to_upper(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFutu
     })
 }
 
-fn builtin_str_to_lower(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_str_to_lower(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "str.to_lower")?;
         let s = expect_string(&args[0])?;
@@ -6774,7 +7203,10 @@ fn str_parse_int(s: &str, target: IntType) -> RuntimeResult<Value> {
     }
 }
 
-fn builtin_str_to_i32(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_str_to_i32(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "str.to_i32")?;
         let s = expect_string(&args[0])?;
@@ -6782,7 +7214,10 @@ fn builtin_str_to_i32(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
     })
 }
 
-fn builtin_str_to_i64(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_str_to_i64(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "str.to_i64")?;
         let s = expect_string(&args[0])?;
@@ -6790,7 +7225,10 @@ fn builtin_str_to_i64(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
     })
 }
 
-fn builtin_str_to_f64(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_str_to_f64(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "str.to_f64")?;
         let s = expect_string(&args[0])?;
@@ -6807,7 +7245,10 @@ fn builtin_str_to_f64(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
     })
 }
 
-fn builtin_str_trim(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_str_trim(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "str.trim")?;
         let s = expect_string(&args[0])?;
@@ -6815,7 +7256,10 @@ fn builtin_str_trim(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'
     })
 }
 
-fn builtin_str_split(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_str_split(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "str.split")?;
         let s = expect_string(&args[0])?;
@@ -6831,7 +7275,10 @@ fn builtin_str_split(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<
     })
 }
 
-fn builtin_str_replace(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_str_replace(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 3, "str.replace")?;
         let s = expect_string(&args[0])?;
@@ -6841,7 +7288,10 @@ fn builtin_str_replace(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFutur
     })
 }
 
-fn builtin_str_find(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_str_find(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "str.find")?;
         let s = expect_string(&args[0])?;
@@ -6858,7 +7308,10 @@ fn builtin_str_find(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'
     })
 }
 
-fn builtin_str_contains(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_str_contains(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "str.contains")?;
         let s = expect_string(&args[0])?;
@@ -6867,7 +7320,10 @@ fn builtin_str_contains(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFutu
     })
 }
 
-fn builtin_str_starts_with(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_str_starts_with(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "str.starts_with")?;
         let s = expect_string(&args[0])?;
@@ -6876,7 +7332,10 @@ fn builtin_str_starts_with(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxF
     })
 }
 
-fn builtin_str_ends_with(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_str_ends_with(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "str.ends_with")?;
         let s = expect_string(&args[0])?;
@@ -6885,35 +7344,50 @@ fn builtin_str_ends_with(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFut
     })
 }
 
-fn builtin_result_ok(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_result_ok(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "result.ok")?;
         Ok(result_ok_value(args[0].clone(), None, None))
     })
 }
 
-fn builtin_result_err(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_result_err(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "result.err")?;
         Ok(result_err_value(args[0].clone(), None, None))
     })
 }
 
-fn builtin_option_some(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_option_some(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "option.some")?;
         Ok(option_some_value(args[0].clone(), None))
     })
 }
 
-fn builtin_option_none(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_option_none(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 0, "option.none")?;
         Ok(option_none_value(None))
     })
 }
 
-fn builtin_async_sleep(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_async_sleep(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "async.sleep")?;
         let duration = expect_int(&args[0])?;
@@ -6921,7 +7395,10 @@ fn builtin_async_sleep(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFutur
     })
 }
 
-fn builtin_async_timeout(interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_async_timeout(
+    interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     let cloned_interp = interp.clone();
     Box::pin(async move {
         ensure_arity(&args, 2, "async.timeout")?;
@@ -6935,7 +7412,10 @@ fn builtin_async_timeout(interp: &Interpreter, args: Vec<Value>) -> LocalBoxFutu
     })
 }
 
-fn builtin_async_spawn(interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_async_spawn(
+    interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     let cloned_interp = interp.clone();
     Box::pin(async move {
         if args.is_empty() {
@@ -6943,59 +7423,93 @@ fn builtin_async_spawn(interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
         }
         let func = args[0].clone();
         let fn_args = args.iter().skip(1).cloned().collect::<Vec<_>>();
-        Ok(make_future(FutureValue::new_spawn(cloned_interp, func, fn_args)))
+        Ok(make_future(FutureValue::new_spawn(
+            cloned_interp,
+            func,
+            fn_args,
+        )))
     })
 }
 
-fn builtin_async_then(interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_async_then(
+    interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     let cloned_interp = interp.clone();
     Box::pin(async move {
         ensure_arity(&args, 2, "async.then")?;
         let fut = expect_future(&args[0])?;
         let callback = args[1].clone();
-        Ok(make_future(FutureValue::new_then(cloned_interp, fut, callback)))
+        Ok(make_future(FutureValue::new_then(
+            cloned_interp,
+            fut,
+            callback,
+        )))
     })
 }
 
-fn builtin_async_catch(interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_async_catch(
+    interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     let cloned_interp = interp.clone();
     Box::pin(async move {
         ensure_arity(&args, 2, "async.catch")?;
         let fut = expect_future(&args[0])?;
         let callback = args[1].clone();
-        Ok(make_future(FutureValue::new_catch(cloned_interp, fut, callback)))
+        Ok(make_future(FutureValue::new_catch(
+            cloned_interp,
+            fut,
+            callback,
+        )))
     })
 }
 
-fn builtin_async_finally(interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_async_finally(
+    interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     let cloned_interp = interp.clone();
     Box::pin(async move {
         ensure_arity(&args, 2, "async.finally")?;
         let fut = expect_future(&args[0])?;
         let callback = args[1].clone();
-        Ok(make_future(FutureValue::new_finally(cloned_interp, fut, callback)))
+        Ok(make_future(FutureValue::new_finally(
+            cloned_interp,
+            fut,
+            callback,
+        )))
     })
 }
 
-    fn builtin_async_cancel(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-        Box::pin(async move {
-            ensure_arity(&args, 1, "async.cancel")?;
-            let fut = expect_future(&args[0])?;
-            fut.cancelled.set(true);
-            Ok(Value::Null)
-        })
-    }
+fn builtin_async_cancel(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        ensure_arity(&args, 1, "async.cancel")?;
+        let fut = expect_future(&args[0])?;
+        fut.cancelled.set(true);
+        Ok(Value::Null)
+    })
+}
 
-    fn builtin_async_is_cancelled(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
-        Box::pin(async move {
-            ensure_arity(&args, 1, "async.is_cancelled")?;
-            let fut = expect_future(&args[0])?;
-            let cancelled = fut.cancelled.get();
-            Ok(Value::Bool(cancelled))
-        })
-    }
+fn builtin_async_is_cancelled(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+    Box::pin(async move {
+        ensure_arity(&args, 1, "async.is_cancelled")?;
+        let fut = expect_future(&args[0])?;
+        let cancelled = fut.cancelled.get();
+        Ok(Value::Bool(cancelled))
+    })
+}
 
-fn builtin_async_parallel(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_async_parallel(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "async.parallel")?;
         let tasks = match &args[0] {
@@ -7010,7 +7524,10 @@ fn builtin_async_parallel(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFu
     })
 }
 
-fn builtin_async_race(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_async_race(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         // Implement similarly if needed via FutureValue::new_race
         ensure_arity(&args, 1, "async.race")?;
@@ -7019,16 +7536,26 @@ fn builtin_async_race(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
             _ => return Err(RuntimeError::new("async.race expects a vector of tasks")),
         };
         Ok(make_future(FutureValue {
-            future: futures::future::select_all(
-                tasks.iter().filter_map(|v| if let Value::Future(f) = v { Some(f.future.clone()) } else { None })
-            ).map(|(val, _, _)| val).boxed_local().shared(),
+            future: futures::future::select_all(tasks.iter().filter_map(|v| {
+                if let Value::Future(f) = v {
+                    Some(f.future.clone())
+                } else {
+                    None
+                }
+            }))
+            .map(|(val, _, _)| val)
+            .boxed_local()
+            .shared(),
             kind: Box::new(FutureKind::Race { tasks }), // Just metadata
             cancelled: Rc::new(Cell::new(false)),
         }))
     })
 }
 
-fn builtin_async_all(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_async_all(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         // Same as parallel essentially
         ensure_arity(&args, 1, "async.all")?;
@@ -7040,7 +7567,10 @@ fn builtin_async_all(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<
     })
 }
 
-fn builtin_async_any(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_async_any(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         // Similar to race
         ensure_arity(&args, 1, "async.any")?;
@@ -7049,16 +7579,26 @@ fn builtin_async_any(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<
             _ => return Err(RuntimeError::new("async.any expects a vector of tasks")),
         };
         Ok(make_future(FutureValue {
-            future: futures::future::select_all(
-                tasks.iter().filter_map(|v| if let Value::Future(f) = v { Some(f.future.clone()) } else { None })
-            ).map(|(val, _, _)| val).boxed_local().shared(),
+            future: futures::future::select_all(tasks.iter().filter_map(|v| {
+                if let Value::Future(f) = v {
+                    Some(f.future.clone())
+                } else {
+                    None
+                }
+            }))
+            .map(|(val, _, _)| val)
+            .boxed_local()
+            .shared(),
             kind: Box::new(FutureKind::Any { tasks }),
             cancelled: Rc::new(Cell::new(false)),
         }))
     })
 }
 
-fn builtin_vec_sort(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_vec_sort(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "vec.sort")?;
         let vec_rc = expect_vec(&args[0])?;
@@ -7066,7 +7606,9 @@ fn builtin_vec_sort(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'
         let mut unsupported = false;
         vec_mut.items.sort_by(|a, b| match (a, b) {
             (Value::Int(x), Value::Int(y)) => x.cmp(y),
-            (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+            (Value::Float(x), Value::Float(y)) => {
+                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+            }
             (Value::String(x), Value::String(y)) => x.cmp(y),
             _ => {
                 unsupported = true;
@@ -7080,7 +7622,10 @@ fn builtin_vec_sort(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'
     })
 }
 
-fn builtin_vec_reverse(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_vec_reverse(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "vec.reverse")?;
         let vec_rc = expect_vec(&args[0])?;
@@ -7089,7 +7634,10 @@ fn builtin_vec_reverse(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFutur
     })
 }
 
-fn builtin_vec_insert(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_vec_insert(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 3, "vec.insert")?;
         let vec_rc = expect_vec(&args[0])?;
@@ -7118,7 +7666,10 @@ fn builtin_vec_insert(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
     })
 }
 
-fn builtin_vec_remove(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_vec_remove(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "vec.remove")?;
         let vec_rc = expect_vec(&args[0])?;
@@ -7140,7 +7691,10 @@ fn builtin_vec_remove(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
     })
 }
 
-fn builtin_vec_extend(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_vec_extend(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "vec.extend")?;
         let vec_rc = expect_vec(&args[0])?;
@@ -7398,14 +7952,20 @@ fn expect_map(value: &Value) -> RuntimeResult<Rc<RefCell<MapValue>>> {
     }
 }
 
-fn builtin_map_new(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_map_new(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 0, "map.new")?;
         Ok(make_map_value(HashMap::new(), None, None))
     })
 }
 
-fn builtin_map_put(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_map_put(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 3, "map.put")?;
         let map_rc = expect_map(&args[0])?;
@@ -7430,7 +7990,10 @@ fn builtin_map_put(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'s
     })
 }
 
-fn builtin_map_get(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_map_get(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "map.get")?;
         let map_rc = expect_map(&args[0])?;
@@ -7438,7 +8001,10 @@ fn builtin_map_get(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'s
         let (value_type, result) = {
             let map_ref = map_rc.borrow();
             ensure_tag_match(&map_ref.key_type, &args[1], "map.get key")?;
-            (map_ref.value_type.clone(), map_ref.entries.get(&key).cloned())
+            (
+                map_ref.value_type.clone(),
+                map_ref.entries.get(&key).cloned(),
+            )
         };
         match result {
             Some(val) => Ok(option_some_value(val, value_type)),
@@ -7447,7 +8013,10 @@ fn builtin_map_get(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'s
     })
 }
 
-fn builtin_map_remove(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_map_remove(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "map.remove")?;
         let map_rc = expect_map(&args[0])?;
@@ -7461,7 +8030,10 @@ fn builtin_map_remove(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
     })
 }
 
-fn builtin_map_keys(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_map_keys(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "map.keys")?;
         let map_rc = expect_map(&args[0])?;
@@ -7475,7 +8047,8 @@ fn builtin_map_keys(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'
         let keys: Vec<Value> = {
             let map_ref = map_rc.borrow();
             map_ref
-                .entries.keys()
+                .entries
+                .keys()
                 .map(|k| map_key_to_value(k, key_type.as_ref()))
                 .collect()
         };
@@ -7483,7 +8056,10 @@ fn builtin_map_keys(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'
     })
 }
 
-fn builtin_map_values(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_map_values(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "map.values")?;
         let map_rc = expect_map(&args[0])?;
@@ -7496,7 +8072,10 @@ fn builtin_map_values(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
     })
 }
 
-fn builtin_map_len(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_map_len(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "map.len")?;
         let map_rc = expect_map(&args[0])?;
@@ -7508,7 +8087,10 @@ fn builtin_map_len(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'s
     })
 }
 
-fn builtin_map_contains(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_map_contains(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "map.contains_key")?;
         let map_rc = expect_map(&args[0])?;
@@ -7521,7 +8103,10 @@ fn builtin_map_contains(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFutu
     })
 }
 
-fn builtin_map_items(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_map_items(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "map.items")?;
         let map_rc = expect_map(&args[0])?;
@@ -7569,10 +8154,13 @@ where
     // Check type compatibility
     let elem_type = match (&a_ref.elem_type, &b_ref.elem_type) {
         (Some(ta), Some(tb)) => {
-             if ta != tb {
-                 return Err(RuntimeError::new(format!("{context} type mismatch: {:?} vs {:?}", ta, tb)));
-             }
-             Some(ta.clone())
+            if ta != tb {
+                return Err(RuntimeError::new(format!(
+                    "{context} type mismatch: {:?} vs {:?}",
+                    ta, tb
+                )));
+            }
+            Some(ta.clone())
         }
         (Some(t), None) => Some(t.clone()),
         (None, Some(t)) => Some(t.clone()),
@@ -7583,14 +8171,20 @@ where
     Ok(make_set_value_from_keys(items, elem_type))
 }
 
-fn builtin_set_new(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_set_new(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 0, "set.new")?;
         Ok(make_set_value_from_keys(HashSet::new(), None))
     })
 }
 
-fn builtin_set_insert(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_set_insert(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "set.insert")?;
         let set_rc = expect_set(&args[0])?;
@@ -7607,7 +8201,10 @@ fn builtin_set_insert(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
     })
 }
 
-fn builtin_set_remove(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_set_remove(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "set.remove")?;
         let set_rc = expect_set(&args[0])?;
@@ -7620,7 +8217,10 @@ fn builtin_set_remove(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
     })
 }
 
-fn builtin_set_contains(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_set_contains(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "set.contains")?;
         let set_rc = expect_set(&args[0])?;
@@ -7631,7 +8231,10 @@ fn builtin_set_contains(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFutu
     })
 }
 
-fn builtin_set_len(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_set_len(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "set.len")?;
         let set_rc = expect_set(&args[0])?;
@@ -7643,7 +8246,10 @@ fn builtin_set_len(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'s
     })
 }
 
-fn builtin_set_to_vec(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_set_to_vec(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 1, "set.to_vec")?;
         let set_rc = expect_set(&args[0])?;
@@ -7661,7 +8267,10 @@ fn builtin_set_to_vec(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture
     })
 }
 
-fn builtin_set_union(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_set_union(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "set.union")?;
         let a = expect_set(&args[0])?;
@@ -7670,7 +8279,10 @@ fn builtin_set_union(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<
     })
 }
 
-fn builtin_set_intersection(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_set_intersection(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "set.intersection")?;
         let a = expect_set(&args[0])?;
@@ -7681,7 +8293,10 @@ fn builtin_set_intersection(_interp: &Interpreter, args: Vec<Value>) -> LocalBox
     })
 }
 
-fn builtin_set_difference(_interp: &Interpreter, args: Vec<Value>) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
+fn builtin_set_difference(
+    _interp: &Interpreter,
+    args: Vec<Value>,
+) -> LocalBoxFuture<'static, RuntimeResult<Value>> {
     Box::pin(async move {
         ensure_arity(&args, 2, "set.difference")?;
         let a = expect_set(&args[0])?;

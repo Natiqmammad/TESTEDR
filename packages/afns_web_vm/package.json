@@ -1,0 +1,30 @@
+{
+    "name": "@afns/web-vm",
+    "version": "0.1.0",
+    "description": "ApexForge NightScript Web VM - executes .afbc bytecode in browser",
+    "type": "module",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build": "esbuild src/index.ts --bundle --format=esm --outfile=dist/afns_vm.js --sourcemap",
+        "build:prod": "esbuild src/index.ts --bundle --format=esm --outfile=dist/afns_vm.js --minify",
+        "typecheck": "tsc --noEmit",
+        "test": "vitest run"
+    },
+    "files": [
+        "dist",
+        "src"
+    ],
+    "devDependencies": {
+        "esbuild": "^0.20.0",
+        "typescript": "^5.3.0",
+        "vitest": "^1.2.0"
+    },
+    "keywords": [
+        "afns",
+        "nightscript",
+        "vm",
+        "bytecode"
+    ],
+    "license": "MIT"
+}

@@ -1,0 +1,17 @@
+// UI Counter Example
+// Demonstrates stateful UI with ui.state primitive
+
+import forge.gui.native as ui;
+import forge.log as log;
+
+fun apex() {
+    var count = ui.state(0);
+    
+    ui.window("Counter", fun(ctx) {
+        ctx.text("Count: " + count.get());
+        ctx.button("+1", fun() {
+            count.set(count.get() + 1);
+            log.info("Count incremented to", count.get());
+        });
+    });
+}

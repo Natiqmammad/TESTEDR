@@ -1,0 +1,7 @@
+[package]
+name = "ui_hello"
+version = "0.1.0"
+language = "afml"
+description = "Simple UI hello world example"
+
+[dependencies]
