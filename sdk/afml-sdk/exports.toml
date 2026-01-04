@@ -1,6 +1,0 @@
-[targets]
-afml = true
-
-[exports]
-name = "hello"
-signature = "fn hello(str) -> str"
